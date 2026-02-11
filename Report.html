@@ -232,6 +232,10 @@ points(results$beta[sig_q], results$gamma[sig_q],
        pch=21, bg=pt_col[sig_q], col="black", cex=1.25)
 ```
 ## 9) Merge metadata
+we merged the results of our model with the metadata, performing the left_join by the sample id;
+         before doing this we changed the col_names in the metadata in order to have sample_id in both;
+ 
+         
 ```{r Merge}
 if (any(names(meta_df) == "")) names(meta_df)[names(meta_df) == ""] <- "unknown_id_col"
 
