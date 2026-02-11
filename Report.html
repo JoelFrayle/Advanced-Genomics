@@ -1,0 +1,64 @@
+---
+title: "Report Advanced Genomics"
+author: "Joel Frayle Moreno- Francesco Mazza"
+date: "2026-02-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Project number 5: DNA replication introduces copy number variations that are detectable in RNA-seq
+
+We have to install and run the required packages:
+
+```{r packages, echo=FALSE}
+#install.packages('lubridate')
+pkgs <- c("dplyr","data.table","stringr","scales","tibble")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+```
+
+## FILE HANDLING 
+
+First we read the datasets and then we explore them. 
+expr_df is a collection of gene expression data for E. Coli generated through single cell RNA-seq analysis, and have been already normalized with logarithmic function; each colname represents the experiments, and the rownames represent the genes_identifier;
+meta_df instead contains all the metadata related to each sample;
+
+
+```{r file reading }
+
+expr_df <- read.csv("log_tpm.csv", check.names = FALSE)  # first col = gene_id
+meta_df <- read.csv("sample_table.csv", check.names = FALSE)
+colnames(expr_df)[1:10]
+colnames(meta_df)[1:10]
+```
+
+## Mapping
+We retrieve the information from NCBI that give us the Genes, and the position in a lineal sequence. This is going to help us later to set the position of each one of the genes in our dataset.
+
+```{r file reading }
+gff_url  <- "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.gff.gz"
+gff_file <- "GCF_000005845.2_ASM584v2_genomic.gff.gz"
+if (!file.exists(gff_file)) download.file(gff_url, gff_file, mode="wb")
+gff <- fread(gff_file, sep="\t", header=FALSE, quote="", comment.char="#", fill=TRUE) #fread help us to manage the information from the NCBI File
+setnames(gff, c("seqid","source","type","start","end","score","strand","phase","attr")) #We set some known names to the columns to manage more easy the 
+table(gff$type) #We make some expoloration of the data in gff
+```
+
+## Extraction usefull information
+
+```{r file reading }
+gff <- gff[type == "gene"] #We remain just with the gene information
+gff[, gene_id := sub(".*locus_tag=([^;]+).*", "\\1", attr)] #We extract from the NCBI attr the identificator of the gene that correspond to the name of the gene in our dataset
+
+seq_spans <- gff[, .(span = max(end, na.rm=TRUE) - min(start, na.rm=TRUE)), by=seqid] #We extract the positions of the gene
+main_seqid <- seq_spans[which.max(span), seqid] #The Id of the gene
+genes_main <- genes[seqid == main_seqid] #We remain just with the genes that we have in our dataset
+L <- max(genes_main$end, na.rm=TRUE) 
+
+gene_coords <- genes_main[grepl("^b\\d{4}$", gene_id),
+                          .(gene_id, start, end, strand, pos=(start+end)/2)]
+gene_coords <- unique(gene_coords, by="gene_id")
+```
