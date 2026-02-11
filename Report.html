@@ -36,7 +36,7 @@ colnames(meta_df)[1:10]
 ```
 
 ## Mapping
-We retrieve the information from NCBI that give us the Genes, and the position in a lineal sequence. This is going to help us later to set the position of each one of the genes in our dataset.
+We retrieve the information from NCBI that give us the Genes, and the position in a linear sequence. This is going to help us later to set the position of each one of the genes in our dataset.
 
 ```{r file reading }
 gff_url  <- "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.gff.gz"
@@ -47,7 +47,10 @@ setnames(gff, c("seqid","source","type","start","end","score","strand","phase","
 table(gff$type) #We make some expoloration of the data in gff
 ```
 
-## Extraction usefull information
+## Extraction usefull information:
+  we subset from gff, and we keep only the information for our specific case: gene_id, start and end position of each gene;
+  as we need a circular chromosome, we need to compute the specific position; we set "pos" as the average of the start and end positions of each gene; 
+  then we will approximate the position of each gene to these "pos" values.
 
 ```{r file reading }
 gff <- gff[type == "gene"] #We remain just with the gene information
@@ -65,6 +68,9 @@ gene_coords <- gff[grepl("^b\\d{4}$", gene_id),
                           .(gene_id, start, end, strand, pos=(start+end)/2)]
 gene_coords <- unique(gene_coords, by="gene_id")
 ```
+
+
+  
 ```{r file reading }
   ## 4) Map expression matrix to genes with coords
 expr_gene_id <- expr_df[[1]] #Expression values themselves have no genomic meaning unless you know which gene each row corresponds to
