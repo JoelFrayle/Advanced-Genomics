@@ -65,14 +65,13 @@ L <- max(gff$end, na.rm=TRUE)
 #your estimate of the genome length (useful for building circular coordinates later). 
 #L should be approximately the chromosome length (e.g., ~4.6e6 for E. coli K12).
 gene_coords <- gff[grepl("^b\\d{4}$", gene_id),
-                          .(gene_id, start, end, strand, pos=(start+end)/2)]
+                          .(gene_id, start, end, pos=(start+end)/2)]
 gene_coords <- unique(gene_coords, by="gene_id")
 ```
 
-
+## 4) Map expression matrix to genes with coords
   
 ```{r file reading }
-  ## 4) Map expression matrix to genes with coords
 expr_gene_id <- expr_df[[1]] #Expression values themselves have no genomic meaning unless you know which gene each row corresponds to
 #This vector becomes the backbone for joining expression ↔ coordinates
 anyDuplicated(expr_gene_id) #0 ok! 
@@ -88,7 +87,23 @@ rownames(expr_mat) <- expr_df[[1]]
 storage.mode(expr_mat) <- "numeric"
 expr_mat2 <- expr_mat[gene_info$gene_id, , drop=FALSE]
 ```
+  
 #### 5) Bin genes + compute theta for bin midpoints
+as suggested by the assignment, we divided the circular genome into fixed-size windows;
+  of size 100 kb;
+we called each window a bin, and we have like 46 bins, according to the total size of the Coli Genome;
+
+
+  
+
+Assigning each gene to a bin based on its genomic position
+
+Computing a single angular coordinate (theta) per bin
+
+Preparing indices so you can aggregate expression per bin later
+We’re now modeling expression as a sinusoid over the genome.
+  
+```{r file reading }
 window_size <- 100000
 #E. coli genome ≈ 4.6 Mb → ~46 bins This is a tradeoff:
    #Smaller bins → noisier but higher resolution
@@ -103,7 +118,7 @@ gene_info <- gene_info %>%
     theta_bin = 2*pi*bin_mid/L
   )
 #y = α + β cos(θ) + γ sin(θ)
-#You’re now modeling expression as a sinusoid over the genome.
+
 
 idx_by_bin <- split(seq_len(nrow(gene_info)), gene_info$bin)
 n_genes_in_window <- sapply(idx_by_bin, length)
@@ -115,9 +130,11 @@ theta_by_bin <- gene_info %>%
   distinct(bin, theta_bin) %>%
   mutate(bin = as.integer(bin)) %>%
   arrange(bin)
-
+```
+  
 ##### 6) Mean logTPM per bin per sample
 
+```{r cars}
 #Compute mean expression per bin per sample
 y_bin_mat <- sapply(idx_by_bin, function(idx) {
   colMeans(expr_mat2[idx, , drop=FALSE], na.rm=TRUE)
@@ -133,8 +150,11 @@ bin_expr <- data.frame(
   left_join(theta_by_bin, by="bin") %>%
   mutate(n_genes = rep(as.integer(n_genes_in_window), times=ncol(y_bin_mat)))
 
+
+```
 ## 7) Fit circular model per sample: full model only
-fit_one_sample <- function(df, use_weights=TRUE) {
+```{r cars}
+  fit_one_sample <- function(df, use_weights=TRUE) {
   w <- if (use_weights) df$n_genes else NULL
   
   fit0    <- lm(y ~ 1, data=df, weights=w)
@@ -167,8 +187,10 @@ results <- bin_expr %>%
   as_tibble()
 
 sig_q <- !is.na(results$q_full) & results$q_full < 0.05
+```
 
 ## 8) Quick diagnostics (A and beta/gamma cloud)
+
 col_q_fun <- scales::col_numeric(palette=c("red","blue"), domain=c(0,1), na.color="grey80")
 pt_col <- col_q_fun(pmin(pmax(results$q_full, 0), 1))
 
