@@ -62,3 +62,20 @@ gene_coords <- genes_main[grepl("^b\\d{4}$", gene_id),
                           .(gene_id, start, end, strand, pos=(start+end)/2)]
 gene_coords <- unique(gene_coords, by="gene_id")
 ```
+```{r file reading }
+  ## 4) Map expression matrix to genes with coords
+expr_gene_id <- expr_df[[1]] #Expression values themselves have no genomic meaning unless you know which gene each row corresponds to
+#This vector becomes the backbone for joining expression ↔ coordinates
+anyDuplicated(expr_gene_id) #0 ok! 
+#“take genes in expression order, then attach coordinates if available.”
+#check if there are NA in pos
+unique(is.na(gene_coords$pos))
+gene_info <- tibble(gene_id = expr_gene_id) %>%
+  left_join(as.data.frame(gene_coords) %>% mutate(gene_id=as.character(gene_id)),
+            by="gene_id")
+
+expr_mat <- as.matrix(expr_df[, -1])
+rownames(expr_mat) <- expr_df[[1]]
+storage.mode(expr_mat) <- "numeric"
+expr_mat2 <- expr_mat[gene_info$gene_id, , drop=FALSE]
+```
