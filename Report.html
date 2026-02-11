@@ -90,7 +90,7 @@ storage.mode(expr_mat) <- "numeric"
 expr_mat2 <- expr_mat[gene_info$gene_id, , drop=FALSE] #We organize our matrix to keep only rows corresponding to genes with coordinates, reorders it to match exactly the order of gene_info.
 ```
   
-## 5) Bin genes + compute theta for bin midpoints
+## Bin definition
 as suggested by the assignment, we divided the circular genome into fixed-size windows of size 100 kb;
   each window is a bin; 
    We have 46 bins, according to the total size of the Coli Genome;
@@ -128,15 +128,15 @@ theta_by_bin <- gene_info %>%
 ```
   
   
-##### 6) Mean logTPM per bin per sample
+## Mean logTPM per bin per sample
 
-```{r cars}
-#Compute mean expression per bin per sample
+Now we have to aggregate the gene expression into bin expression. So at the end of this step we will have a long format with the bin, the sample, the mean expression, the position in angular coordinate and the number of genes in each window. In this way, if necessary, we can easily apply a weighting.
+```{r Bin Expression}
 y_bin_mat <- sapply(idx_by_bin, function(idx) {
   colMeans(expr_mat2[idx, , drop=FALSE], na.rm=TRUE)
-})
-y_bin_mat <- t(y_bin_mat)  # rows=bins, cols=samples
-bins <- as.integer(names(idx_by_bin))
+}) #Here we build our dataset with the average expression for each bin. 
+y_bin_mat <- t(y_bin_mat)  # And as we want to mantain the order we use the transpose so we have in the columns the experiments and in the lines the bin.
+bins <- as.integer(names(idx_by_bin)) #Its easier to use the bins as an integer in the future
 
 bin_expr <- data.frame(
   bin       = rep(bins, times = ncol(y_bin_mat)),
@@ -144,7 +144,10 @@ bin_expr <- data.frame(
   y         = as.vector(y_bin_mat)
 ) %>%
   left_join(theta_by_bin, by="bin") %>%
-  mutate(n_genes = rep(as.integer(n_genes_in_window), times=ncol(y_bin_mat)))
+  mutate(n_genes = rep(as.integer(n_genes_in_window), times=ncol(y_bin_mat))) #Here we have our output for the model. With the long format required
+
+head(bin_expr)
+```
 
 
 ```
