@@ -52,13 +52,16 @@ table(gff$type) #We make some expoloration of the data in gff
 ```{r file reading }
 gff <- gff[type == "gene"] #We remain just with the gene information
 gff[, gene_id := sub(".*locus_tag=([^;]+).*", "\\1", attr)] #We extract from the NCBI attr the identificator of the gene that correspond to the name of the gene in our dataset
-
-seq_spans <- gff[, .(span = max(end, na.rm=TRUE) - min(start, na.rm=TRUE)), by=seqid] #We extract the positions of the gene
-main_seqid <- seq_spans[which.max(span), seqid] #The Id of the gene
-genes_main <- genes[seqid == main_seqid] #We remain just with the genes that we have in our dataset
-L <- max(genes_main$end, na.rm=TRUE) 
-
-gene_coords <- genes_main[grepl("^b\\d{4}$", gene_id),
+gff <- gff[, .(gene_id, start, end)]
+typeof(gff$start)
+gff[, start := as.integer(start)]
+gff[, end   := as.integer(end)]    #We extract the positions of the gene
+typeof(gff$start)
+L <- max(gff$end, na.rm=TRUE) 
+#Sets L to the maximum end coordinate on the main chromosome: 
+#your estimate of the genome length (useful for building circular coordinates later). 
+#L should be approximately the chromosome length (e.g., ~4.6e6 for E. coli K12).
+gene_coords <- gff[grepl("^b\\d{4}$", gene_id),
                           .(gene_id, start, end, strand, pos=(start+end)/2)]
 gene_coords <- unique(gene_coords, by="gene_id")
 ```
@@ -79,3 +82,117 @@ rownames(expr_mat) <- expr_df[[1]]
 storage.mode(expr_mat) <- "numeric"
 expr_mat2 <- expr_mat[gene_info$gene_id, , drop=FALSE]
 ```
+#### 5) Bin genes + compute theta for bin midpoints
+window_size <- 100000
+#E. coli genome ≈ 4.6 Mb → ~46 bins This is a tradeoff:
+   #Smaller bins → noisier but higher resolution
+   #Larger bins → smoother but may wash out signal
+#check
+L / window_size    #46.41628
+gene_info <- gene_info %>%
+  mutate(
+    pos_mod   = pos %% L,
+    bin       = floor(pos_mod / window_size),
+    bin_mid   = ((bin + 0.5) * window_size) %% L,
+    theta_bin = 2*pi*bin_mid/L
+  )
+#y = α + β cos(θ) + γ sin(θ)
+#You’re now modeling expression as a sinusoid over the genome.
+
+idx_by_bin <- split(seq_len(nrow(gene_info)), gene_info$bin)
+n_genes_in_window <- sapply(idx_by_bin, length)
+#per ogni bin, conta quanti geni ci sono falling!
+# 0  1  2  3  4  5 
+#86 85 97 88 93 89 
+
+theta_by_bin <- gene_info %>%
+  distinct(bin, theta_bin) %>%
+  mutate(bin = as.integer(bin)) %>%
+  arrange(bin)
+
+##### 6) Mean logTPM per bin per sample
+
+#Compute mean expression per bin per sample
+y_bin_mat <- sapply(idx_by_bin, function(idx) {
+  colMeans(expr_mat2[idx, , drop=FALSE], na.rm=TRUE)
+})
+y_bin_mat <- t(y_bin_mat)  # rows=bins, cols=samples
+bins <- as.integer(names(idx_by_bin))
+
+bin_expr <- data.frame(
+  bin       = rep(bins, times = ncol(y_bin_mat)),
+  sample_id = rep(colnames(y_bin_mat), each = length(bins)),
+  y         = as.vector(y_bin_mat)
+) %>%
+  left_join(theta_by_bin, by="bin") %>%
+  mutate(n_genes = rep(as.integer(n_genes_in_window), times=ncol(y_bin_mat)))
+
+## 7) Fit circular model per sample: full model only
+fit_one_sample <- function(df, use_weights=TRUE) {
+  w <- if (use_weights) df$n_genes else NULL
+  
+  fit0    <- lm(y ~ 1, data=df, weights=w)
+  fitFull <- lm(y ~ cos(theta_bin) + sin(theta_bin), data=df, weights=w)
+  
+  p_full <- anova(fit0, fitFull)$`Pr(>F)`[2]
+  
+  coefs <- coef(summary(fitFull))
+  alpha <- coefs["(Intercept)", "Estimate"]
+  beta  <- coefs["cos(theta_bin)", "Estimate"]
+  gamma <- coefs["sin(theta_bin)", "Estimate"]
+  
+  # amplitude/phase representation:
+  # y(theta) = alpha + A cos(theta - phi)
+  A     <- sqrt(beta^2 + gamma^2)
+  phi   <- atan2(gamma, beta)              # [-pi, pi]
+  delta <- 2*A                              # naive: max-min in log space
+  
+  theta_max <- (phi %% (2*pi))             # where cos(theta-phi) is max
+  theta_min <- (theta_max + pi) %% (2*pi)
+  
+  tibble(alpha, beta, gamma, A, phi, delta, theta_max, theta_min, p_full)
+}
+
+results <- bin_expr %>%
+  group_by(sample_id) %>%
+  group_modify(~ fit_one_sample(.x, use_weights=TRUE)) %>%
+  ungroup() %>%
+  mutate(q_full = p.adjust(p_full, method="BH")) %>%
+  as_tibble()
+
+sig_q <- !is.na(results$q_full) & results$q_full < 0.05
+
+## 8) Quick diagnostics (A and beta/gamma cloud)
+col_q_fun <- scales::col_numeric(palette=c("red","blue"), domain=c(0,1), na.color="grey80")
+pt_col <- col_q_fun(pmin(pmax(results$q_full, 0), 1))
+
+hist(results$A, breaks=50, main="Amplitude A (all samples)", xlab="A",
+     col="grey90", border="grey60")
+rug(results$A, col="grey60")
+#rug(results$A[sig_p], col="orange", lwd=2)
+rug(results$A[sig_q], col="red", lwd=2)
+legend("topright",
+       legend=c("All","q_full<0.05"),
+       col=c("grey60","red"), lwd=c(1,2), bty="n")
+
+plot(results$beta, results$gamma,
+     xlab="beta (cos)", ylab="gamma (sin)",
+     main="beta vs gamma (colored by q_full)",
+     pch=16, col=pt_col, cex=ifelse(sig_q, 1.2, 0.7))
+abline(h=0, v=0, lty=3)
+points(results$beta[sig_q], results$gamma[sig_q],
+       pch=21, bg=pt_col[sig_q], col="black", cex=1.25)
+
+## 9) Merge metadata
+if (any(names(meta_df) == "")) names(meta_df)[names(meta_df) == ""] <- "unknown_id_col"
+
+find_best_id_col <- function(meta_df, sample_ids) {
+  cols <- names(meta_df)
+  scores <- sapply(cols, function(cc) sum(as.character(meta_df[[cc]]) %in% sample_ids, na.rm=TRUE))
+  cols[which.max(scores)]
+}
+best_id_col <- find_best_id_col(meta_df, results$sample_id)
+cat("Best metadata ID column:", best_id_col, "\n")
+
+meta2 <- meta_df %>% mutate(sample_id = as.character(.data[[best_id_col]]))
+merged_results <- results %>% left_join(meta2, by="sample_id")
