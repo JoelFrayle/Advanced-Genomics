@@ -151,7 +151,15 @@ head(bin_expr)
 
 
 ```
-## 7) Fit circular model per sample: full model only
+## Fit circular model per sample: full model only
+For each sample, we:
+  -fit a null model (flat expression along the genome)
+  -fit a circular (sinusoidal) model
+Test whether the sinusoid explains significantly more variance
+Extract biologically meaningful quantities:
+mean level, amplitude, phase (where the peak is), naive CNV metric
+  -Correct p-values across samples
+  
 ```{r cars}
   fit_one_sample <- function(df, use_weights=TRUE) {
   w <- if (use_weights) df$n_genes else NULL
@@ -187,6 +195,7 @@ results <- bin_expr %>%
 
 sig_q <- !is.na(results$q_full) & results$q_full < 0.05
 ```
+
 
 ## 8) Quick diagnostics (A and beta/gamma cloud)
 
