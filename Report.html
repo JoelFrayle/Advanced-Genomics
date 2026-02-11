@@ -43,7 +43,8 @@ gff_url  <- "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005
 gff_file <- "GCF_000005845.2_ASM584v2_genomic.gff.gz"
 if (!file.exists(gff_file)) download.file(gff_url, gff_file, mode="wb")
 gff <- fread(gff_file, sep="\t", header=FALSE, quote="", comment.char="#", fill=TRUE) #fread help us to manage the information from the NCBI File
-setnames(gff, c("seqid","source","type","start","end","score","strand","phase","attr")) #We set some known names to the columns to manage more easy the 
+setnames(gff, c("seqid","source","type","start","end","score","strand","phase","attr")) #We set some known names to the columns to manage more easy the
+genes_main <- copy(gff)
 table(gff$type) #We make some expoloration of the data in gff
 ```
 
@@ -55,10 +56,14 @@ table(gff$type) #We make some expoloration of the data in gff
 ```{r obtaining coordinates}
 gff <- gff[type == "gene"] #We remain just with the gene information
 gff[, gene_id := sub(".*locus_tag=([^;]+).*", "\\1", attr)] #We extract from the NCBI attr the identificator of the gene that correspond to the name of the gene in our dataset
+seq_spans <- gff[, .(span = max(end, na.rm=TRUE) - min(start, na.rm=TRUE)), by=seqid]
+main_seqid <- seq_spans[which.max(span), seqid]
+genes_main <- gff[seqid == main_seqid]
 gff <- gff[, .(gene_id, start, end)]
 gff[, start := as.integer(start)]
 gff[, end   := as.integer(end)]    #We extract the positions of the gene
 typeof(gff$start)
+
 L <- max(gff$end, na.rm=TRUE) 
 #Sets L to the maximum end coordinate on the main chromosome: 
 #your estimate of the genome length (useful for building circular coordinates later). 
@@ -89,10 +94,10 @@ expr_mat <- as.matrix(expr_df[, -1]) #We transform our data into a matrix to app
 rownames(expr_mat) <- expr_df[[1]]
 storage.mode(expr_mat) <- "numeric"
 expr_mat2 <- expr_mat[gene_info$gene_id, , drop=FALSE] #We organize our matrix to keep only rows corresponding to genes with coordinates, reorders it to match exactly the order of gene_info.
-head(expr_mat2)
+head(expr_mat2[, 1:6, drop=FALSE])
 ```
 
-## Bin genes + compute theta for bin midpoints
+## Genes grouped by Bins
 As suggested by the assignment, we divided the circular genome into fixed-size windows of 100 kb length;
   each window is a bin; 
    We have 46 bins, according to the total length of the Coli Genome;
@@ -155,7 +160,7 @@ For each sample, we fit a null model (fit0) that assumes constant expression acr
 We parametrized the circular model using sine and cosine basis functions, allowing the sinusoidal pattern to be estimated within a linear regression framework. This avoids nonlinear optimization ($y = \alpha + A *Cos(\theta-\phi) $) over amplitude and phase parameters.
 
 The non linear model starts by representing the bin as follows:
-$$A*(\cos(\theta-\phi))=A\cos(\theta)\cos(\phi)+A\sin(\theta)\sin(\phi)$$
+$$A(\cos(\theta-\phi))=A\cos(\theta)\cos(\phi)+A\sin(\theta)\sin(\phi)$$
 We defined:S
 $$\beta = A\cos{\phi}$$
 $$\gamma=A\sin(\phi)$$
@@ -173,13 +178,19 @@ We can retrive the position due to the fact that we have $\phi$, where the expre
 to apply the model to all the samples, we used the fit_one_sample function that we've just created. This function operates on one sample's binned data, so in the "results" variable for each sample, there are all the parameters of the fitted model explained above.  
 In order to evaluate if there is statistical evidence to reject the null model "fit0", we used an anova F test to compute p value (p_full), then corrected with BH method for multiple testing correction (q_full)
 ```{r Model}
-  fit_one_sample <- function(df, use_weights=TRUE) {
+fit_one_sample <- function(df, use_weights=TRUE) {
   w <- if (use_weights) df$n_genes else NULL
   
   fit0    <- lm(y ~ 1, data=df, weights=w)
   fitFull <- lm(y ~ cos(theta_bin) + sin(theta_bin), data=df, weights=w)
   
+  # Reduced models (for later comparison)
+  fitCos <- lm(y ~ cos(theta_bin), data=df, weights=w)
+  fitSin <- lm(y ~ sin(theta_bin), data=df, weights=w)
+  
   p_full <- anova(fit0, fitFull)$`Pr(>F)`[2]
+  p_cos  <- anova(fit0, fitCos )$`Pr(>F)`[2]
+  p_sin  <- anova(fit0, fitSin )$`Pr(>F)`[2]
   
   coefs <- coef(summary(fitFull))
   alpha <- coefs["(Intercept)", "Estimate"]
@@ -195,63 +206,126 @@ In order to evaluate if there is statistical evidence to reject the null model "
   theta_max <- (phi %% (2*pi))             # where cos(theta-phi) is max
   theta_min <- (theta_max + pi) %% (2*pi)
   
-  tibble(alpha, beta, gamma, A, phi, delta, theta_max, theta_min, p_full)
+  tibble(alpha, beta, gamma, A, phi, delta, theta_max, theta_min, p_full, p_cos, p_sin)
 }
 
 results <- bin_expr %>%
   group_by(sample_id) %>%
   group_modify(~ fit_one_sample(.x, use_weights=TRUE)) %>%
   ungroup() %>%
-  mutate(q_full = p.adjust(p_full, method="BH")) %>%
+  mutate(
+    q_full = p.adjust(p_full, method="BH"),
+    q_cos  = p.adjust(p_cos,  method="BH"),
+    q_sin  = p.adjust(p_sin,  method="BH")
+  ) %>%
   as_tibble()
 
 sig_q <- !is.na(results$q_full) & results$q_full < 0.05
 head(results)
 ```
+## Visual Data exploration
+The histogram shows the distribution of amplitude values across all samples. Most amplitudes cluster at low values, and the distribution is clearly right-skewed, with a long tail toward larger amplitudes. The rug marks indicate where significant fits (`q_full < 0.05`) fall along the x-axis: they are sparse at very low amplitudes and become increasingly frequent as amplitude increases, concentrating mainly in the upper part of the distribution.
 
-## Quick diagnostics (A and beta/gamma cloud)
-```{r Plot}
+This scatter plot shows the fitted $\beta$ (cosine component) against $\gamma$ (sine component) across samples, with points colored by `q_full`. The cloud is densest near the origin, indicating that most samples have small estimated coefficients. As expected, the most significant fits concentrate away from (0,0), while points near the origin are predominantly non-significant. The distribution is not isotropic: the sample cloud is elongated along a negative diagonal, suggesting that $\beta$ and $\gamma$ may not be independent in practice and tend to co-vary with opposite signs in many samples.
+
+How are these significant values distributed? In the $(\beta,\gamma)$ plane, significant samples are primarily enriched at larger distances from the origin (equivalently, larger $A$), indicating that significance largely tracks effect size. In our data, the median $A$ increases from 0.0859 in non-significant samples to 0.214 in significant samples (`q_full < 0.05`; Wilcoxon p-value $= 5.89\times10^{-38}$). To assess whether there is also a preferred direction (i.e., a consistent peak location across samples), we examine the angular distribution (`phi`) among significant samples; the resulting histogram shows clear clustering rather than a uniform spread, suggesting that many significant samples share similar peak directions.
+
+What happens if the models account only for the cosine or only for the sine term? The reduced models typically retain significance only for samples whose signal is sufficiently aligned with that single basis term. In our dataset, the full model identifies 95 significant samples, whereas the cosine-only and sine-only models identify 24 and 39, respectively. Importantly, 37 samples are significant under the full model but not under either reduced model, consistent with signals that require both sine and cosine terms (i.e., peak directions not aligned with a single basis). Conversely, only 5 samples are significant under the sine-only model but not under the full model, which is consistent with borderline cases where the 1-df reduced model can be slightly more powerful than the 2-df full model.
+
+What does the estimated parameter mean? The pair $(\beta,\gamma)$ jointly encodes magnitude and direction: the distance to the origin reflects effect size (strength of the fitted pattern), while the angle (`phi`) reflects where along the circle the maximum/minimum occurs. Therefore, points farther from (0,0) correspond to stronger fitted patterns, while different quadrants/angles correspond to different peak positions.
+
+Do you think one can derive a quantitative relationship of the parameter from the model and the growth rate? Under the replication-driven assumptions, larger effect sizes (e.g., $A$ or $2A$) should tend to be associated with higher growth rate $\mu$.
+}
+Overall, these comparisons support using q_full as the primary significance criterion in the remainder of the analysis. The full model is phase-invariant (it captures signal regardless of whether it aligns with the cosine or sine basis) and therefore detects substantially more significant samples than either reduced model (95 vs 24/39). The presence of many ‘full-only’ cases (37 samples significant only under q_full) indicates that restricting to a single basis term would miss a large fraction of signals whose peak direction is not aligned with that term. While a small number of borderline cases can be recovered by a 1-df reduced model (5 samples significant only under q_sin), the overall gain in sensitivity and robustness makes q_full the most appropriate and conservative choice for downstream analyses.
+```{r Plot, echo=FALSE}
 col_q_fun <- scales::col_numeric(palette=c("red","blue"), domain=c(0,1), na.color="grey80")
 pt_col <- col_q_fun(pmin(pmax(results$q_full, 0), 1))
 
+
 hist(results$A, breaks=50, main="Amplitude A (all samples)", xlab="A",
-     col="grey90", border="grey60")
+       col="grey90", border="grey60")
 rug(results$A, col="grey60")
-#rug(results$A[sig_p], col="orange", lwd=2)
 rug(results$A[sig_q], col="red", lwd=2)
 legend("topright",
-       legend=c("All","q_full<0.05"),
-       col=c("grey60","red"), lwd=c(1,2), bty="n")
+         legend=c("All","q_full<0.05"),
+         col=c("grey60","red"), lwd=c(1,2), bty="n")
 
 plot(results$beta, results$gamma,
-     xlab="beta (cos)", ylab="gamma (sin)",
-     main="beta vs gamma (colored by q_full)",
-     pch=16, col=pt_col, cex=ifelse(sig_q, 1.2, 0.7))
-abline(h=0, v=0, lty=3)
-points(results$beta[sig_q], results$gamma[sig_q],
-       pch=21, bg=pt_col[sig_q], col="black", cex=1.25)
+       xlab="beta (cos)", ylab="gamma (sin)",
+       main="beta vs gamma (colored by q_full)",
+       pch=16, col=pt_col, cex=ifelse(sig_q, 1.2, 0.7))
+  abline(h=0, v=0, lty=3)
+  points(results$beta[sig_q], results$gamma[sig_q],
+         pch=21, bg=pt_col[sig_q], col="black", cex=1.25)
+
+sig_full <- !is.na(results$q_full) & results$q_full < 0.05
+sig_cos  <- !is.na(results$q_cos)  & results$q_cos  < 0.05
+sig_sin  <- !is.na(results$q_sin)  & results$q_sin  < 0.05
+
+# Effect size enrichment: significant samples have larger A
+w_test <- wilcox.test(results$A ~ sig_full)
+
+A_summary <- tibble(
+  group = c("non-significant (q_full >= 0.05)", "significant (q_full < 0.05)"),
+  median_A = c(median(results$A[!sig_full], na.rm=TRUE),
+               median(results$A[sig_full],  na.rm=TRUE))
+)
+
+wilcox_summary <- tibble(
+  test = "Wilcoxon rank-sum test: A ~ (q_full < 0.05)",
+  p_value = w_test$p.value
+)
+
+# Full vs reduced models: counts and overlap structure
+overlap_summary <- tibble(
+  category = c("Significant (full model): q_full < 0.05",
+               "Significant (cos-only): q_cos < 0.05",
+               "Significant (sin-only): q_sin < 0.05",
+               "Full-only: q_full < 0.05 AND q_cos >= 0.05 AND q_sin >= 0.05",
+               "Sin-only not full: q_sin < 0.05 AND q_full >= 0.05"),
+  n = c(sum(sig_full, na.rm=TRUE),
+        sum(sig_cos,  na.rm=TRUE),
+        sum(sig_sin,  na.rm=TRUE),
+        sum(sig_full & !sig_cos & !sig_sin, na.rm=TRUE),
+        sum(sig_sin & !sig_full, na.rm=TRUE))
+)
+
+# Compact overlap tables, but labeled so they are self-explanatory when printed
+tab_full_cos <- table(`Full significant (q_full<0.05)` = sig_full,
+                      `Cos-only significant (q_cos<0.05)` = sig_cos)
+
+tab_full_sin <- table(`Full significant (q_full<0.05)` = sig_full,
+                      `Sin-only significant (q_sin<0.05)` = sig_sin)
+
+# Directionality: wrap phi to [0, 2pi) to avoid the ±pi boundary split
+phi_02pi <- (results$phi %% (2*pi))
+
+# Print outputs (labeled, so no guessing)
+A_summary
+wilcox_summary
+overlap_summary
+tab_full_cos
+tab_full_sin
+
+hist(phi_02pi[sig_full], breaks=30,
+     main="phi distribution (significant only, wrapped to [0, 2pi))",
+     xlab="phi (radians)")
 ```
+
 ## 9) Merge metadata
-we merged the results of our model with the metadata, performing the left_join by the sample id;
-         before doing this we changed the col_names in the metadata in order to have sample_id in both;
- 
-         
 ```{r Merge}
-if (any(names(meta_df) == "")) names(meta_df)[names(meta_df) == ""] <- "unknown_id_col"
 
-find_best_id_col <- function(meta_df, sample_ids) {
-  cols <- names(meta_df)
-  scores <- sapply(cols, function(cc) sum(as.character(meta_df[[cc]]) %in% sample_ids, na.rm=TRUE))
-  cols[which.max(scores)]
-}
-best_id_col <- find_best_id_col(meta_df, results$sample_id)
-cat("Best metadata ID column:", best_id_col, "\n")
+i <- which(names(meta_df) == "")[1]
+names(meta_df)[i] <- "sample_id"
 
-meta2 <- meta_df %>% mutate(sample_id = as.character(.data[[best_id_col]]))
-merged_results <- results %>% left_join(meta2, by="sample_id")
+merged_results <- dplyr::left_join(
+  results,
+  dplyr::distinct(meta_df, sample_id, .keep_all = TRUE),
+  by = "sample_id"
+)
 
 ```
-## ## 10) Compute theta_ori using dnaA (proxy for oriC)
+
 ## Identification of oriC position
 
 To anchor the circular expression model to a biologically meaningful reference point, we determined the genomic position of the replication origin (oriC). 
@@ -277,7 +351,4 @@ if (nrow(ori_row) == 0) {
 ori_pos <- (ori_row$start[1] + ori_row$end[1]) / 2
 theta_ori <- (2*pi*(ori_pos %% L))/L
 cat("theta_ori (radians):", theta_ori, "\n")
-```
-
-
-  
+``` 
