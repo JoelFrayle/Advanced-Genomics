@@ -179,18 +179,32 @@ So from a regression standpoint:
 y=Xβ+ε
 
 where the design matrix is:
-
 ```
-## Fit circular model per sample: full model only
-For each sample, we:
-  -fit a null model (flat expression along the genome)
-  -fit a circular (sinusoidal) model
-Test whether the sinusoid explains significantly more variance
-Extract biologically meaningful quantities:
-mean level, amplitude, phase (where the peak is), naive CNV metric
-  -Correct p-values across samples
-  
-```{r cars}
+
+## Fit circular model per sample
+For each sample, we fit a null model (fit0) that assumes constant expression across the genome (y=α), we will use this later to compare if using circular model (y = α + β cos(θ) + γ sin(θ)) improves it significantly the fit.
+
+We parametrized the circular model using sine and cosine basis functions, allowing the sinusoidal pattern to be estimated within a linear regression framework. This avoids nonlinear optimization ($y = \alpha + A *Cos(\theta-\phi) $) over amplitude and phase parameters.
+
+The non linear model starts by representing the bin as follows:
+$$A*(\cos(\theta-\phi))=A\cos(\theta)\cos(\phi)+A\sin(\theta)\sin(\phi)$$
+We defined:S
+$$\beta = A\cos{\phi}$$
+$$\gamma=A\sin(\phi)$$
+With this transformation we represent the same model with a different parameterization. From the previous analysis we can set as useful information that:
+$$A=\sqrt{\beta^2+\gamma^2}$$
+That give us the amplitude And:
+$$\phi=\operatorname{atan2}(\gamma, \beta)$$
+That give us the phase, so the position in the circular chromosome in dependence of $\gamma$ and $\beta$.
+We at this point can use also a theoretical treatment that define the phase duration as C= DNA synthesis phase and D= predivisional phase. The doubling time is $\tau = \frac{2}{growthrate}$ and the position of a locus is $n_a= 2^{\frac{p_aC+D}{\tau}}$ where $n_a$ is the copy number of locus $a$ positioned at a distance $p_a$ from the terminus of the chromosome. Due to this we can arrive that: $$log_2\frac{n_{ori}}{n_{ter}}=\frac{C}{\tau}=\frac{C\mu}{ln(2)}$$
+
+In our case we can say that, if expression is proportional to copy number, then in $log_2$ space the difference between maximal and minimal expression across the chromosome corresponds to:
+$$y_{max}-y_{min}=2A=\delta$$
+Thus, the fitted amplitude A provides a quantitative estimate of the replication-associated expression gradient.
+We can retrive the position due to the fact that we have $\phi$, where the expression is maximum and minimum in radiants;
+to apply the model to all the samples, we used the fit_one_sample function that we've just created. This function operates on one sample's binned data, so in the "results" variable for each sample, there are all the parameters of the fitted model explained above.  
+In order to evaluate if there is statistical evidence to reject the null model "fit0", we used an anova F test to compute p value (p_full), then corrected with BH method for multiple testing correction (q_full)
+```{r Model}
   fit_one_sample <- function(df, use_weights=TRUE) {
   w <- if (use_weights) df$n_genes else NULL
   
@@ -224,8 +238,8 @@ results <- bin_expr %>%
   as_tibble()
 
 sig_q <- !is.na(results$q_full) & results$q_full < 0.05
+head(results)
 ```
-
 
 ## 8) Quick diagnostics (A and beta/gamma cloud)
 
