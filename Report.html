@@ -251,3 +251,33 @@ meta2 <- meta_df %>% mutate(sample_id = as.character(.data[[best_id_col]]))
 merged_results <- results %>% left_join(meta2, by="sample_id")
 
 ```
+## ## 10) Compute theta_ori using dnaA (proxy for oriC)
+## Identification of oriC position
+
+To anchor the circular expression model to a biologically meaningful reference point, we determined the genomic position of the replication origin (oriC). 
+  In *E. coli*, the dnaA gene is located immediately adjacent to oriC and was therefore used as a proxy for the origin position. 
+  The dnaA locus was identified from the genome annotation, and its midpoint was computed as:
+
+$$\text{ori\_pos} = \frac{\text{start}_{\text{dnaA}} + \text{end}_{\text{dnaA}}}{2}.$$
+
+This genomic coordinate was then mapped onto the circular genome using:
+
+$$ \theta_{\text{ori}} = \frac{2\pi \cdot (\text{ori\_pos} \bmod L)}{L}, $$
+
+where \( L \) is the chromosome length. 
+  The resulting angular coordinate defines the position of oriC within the circular regression framework and enables computation of the origin–terminus expression contrast.
+
+  
+```{r theta Ori}
+  ori_row <- genes_main[grepl("(^|;)gene=dnaA(;|$)|(^|;)Name=dnaA(;|$)", attr)]
+if (nrow(ori_row) == 0) {
+  print(head(genes_main[grepl("dnaA", attr)]$attr, 10))
+  stop("dnaA not found with gene=/Name=. Inspect attr above and adjust grepl().")
+}
+ori_pos <- (ori_row$start[1] + ori_row$end[1]) / 2
+theta_ori <- (2*pi*(ori_pos %% L))/L
+cat("theta_ori (radians):", theta_ori, "\n")
+```
+
+
+  
