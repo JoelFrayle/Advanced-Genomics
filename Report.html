@@ -148,7 +148,37 @@ bin_expr <- data.frame(
 
 head(bin_expr)
 ```
+y=α+βcos(θ)+γsin(θ)+ε
 
+This is linear in the parameters:
+
+linear in 𝛼
+α
+
+linear in 
+𝛽
+β
+
+linear in 
+𝛾
+γ
+
+Even though cosine and sine are nonlinear functions of 
+𝜃
+θ,
+they are known predictors, not parameters.
+
+So from a regression standpoint:
+
+𝑦
+=
+𝑋
+𝛽
++
+𝜀
+y=Xβ+ε
+
+where the design matrix is:
 
 ```
 ## Fit circular model per sample: full model only
