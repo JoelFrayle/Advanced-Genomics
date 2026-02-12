@@ -565,39 +565,365 @@ if (nrow(datasets$sig_by_p) >= 20) {
 cat("\n--- fit_all summary ---\n"); print(summary(fit_all))
 if (!is.null(fit_hp)) { cat("\n--- fit_hp summary (sig_by_p) ---\n"); print(summary(fit_hp)) }
 ```
-## 17
+## 17 Out-of-fold predictions and regression diagnostics
+
+To further assess the predictive performance and stability of the selected regression model, we generated out-of-fold (OOF) predictions using 5-fold cross-validation. In this procedure, the dataset was partitioned into five folds; for each fold, the model was trained on the remaining four folds and used to predict growth rates in the held-out fold. This ensured that each prediction was obtained from a model that had not been trained on the corresponding sample.
+
+Using these OOF predictions, we computed performance metrics including Root Mean Squared Error (RMSE), Mean Absolute Error (MAE), and the coefficient of determination (
+𝑅
+2
+R
+2
+). These metrics provide an unbiased estimate of generalization performance and allow direct comparison with repeated cross-validation results.
+
+Diagnostic plots were generated to evaluate model behavior. A predicted-versus-observed scatter plot was used to assess calibration and overall predictive agreement, with the identity line indicating perfect prediction. Residual diagnostics included a residuals-versus-fitted plot to detect systematic bias or heteroscedasticity, and a histogram of residuals to examine distributional symmetry and potential outliers.
+
+Together, these analyses provide a comprehensive evaluation of regression performance beyond summary statistics.
 
 
-  ```{r packages}
-#install.packages('lubridate')
-pkgs <- c("dplyr","data.table","stringr","scales","tibble")
-for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
-library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+  ```{r diagnostics}
+cv_oof_pred <- function(df, formula, k=5, seed=123) {
+  set.seed(seed)
+  n <- nrow(df)
+  fold_id <- sample(rep(seq_len(k), length.out=n))
+  pred <- rep(NA_real_, n)
+  for (fold in seq_len(k)) {
+    train <- df[fold_id != fold, , drop=FALSE]
+    test  <- df[fold_id == fold, , drop=FALSE]
+    fit <- lm(formula, data=train)
+    pred[fold_id == fold] <- predict(fit, newdata=test)
+  }
+  df$pred_oof <- pred
+  df
+}
+
+oof_all <- cv_oof_pred(datasets$ALL, growth_rate ~ delta_ori, k=5, seed=123)
+
+resid_oof <- oof_all$growth_rate - oof_all$pred_oof
+rmse_oof <- sqrt(mean(resid_oof^2, na.rm=TRUE))
+mae_oof  <- mean(abs(resid_oof), na.rm=TRUE)
+ss_res <- sum(resid_oof^2, na.rm=TRUE)
+ss_tot <- sum((oof_all$growth_rate - mean(oof_all$growth_rate, na.rm=TRUE))^2, na.rm=TRUE)
+r2_oof <- 1 - ss_res/ss_tot
+
+cat("\n--- OOF metrics (ALL | growth_rate ~ delta_ori) ---\n")
+cat("RMSE =", rmse_oof, "\nMAE  =", mae_oof, "\nR2   =", r2_oof, "\n")
+
+# Predicted vs observed
+plot(oof_all$growth_rate, oof_all$pred_oof,
+     pch=16, col=col_q_fun(pmin(pmax(oof_all$q_full,0),1)),
+     xlab="Observed growth_rate", ylab="OOF predicted growth_rate",
+     main="OOF predicted vs observed (ALL model)")
+abline(0,1, lty=2, lwd=2)
+
+# Residuals
+par(mfrow=c(1,2))
+plot(oof_all$pred_oof, resid_oof, pch=16, col="grey50",
+     xlab="OOF fitted", ylab="Residual", main="Residuals vs fitted (OOF)")
+abline(h=0, lty=2)
+hist(resid_oof, breaks=40, col="grey90", border="grey60",
+     main="Residual distribution (OOF)", xlab="Residual")
+par(mfrow=c(1,1))
 ```
 
-## 18
+## 18 Classification performance: ROC and AUC analysis
+
+To assess whether replication-associated expression metrics can discriminate between faster- and slower-growing samples, we performed a receiver operating characteristic (ROC) analysis. Growth rate was binarized by defining “fast” samples as those in the upper quartile of the observed growth-rate distribution.
+
+Using the out-of-fold predicted growth rates as a continuous score, we computed the ROC curve by evaluating true positive rates (TPR) and false positive rates (FPR) across all possible decision thresholds. The area under the ROC curve (AUC) was calculated using trapezoidal integration.
+
+The AUC quantifies the probability that a randomly chosen fast-growing sample receives a higher predicted score than a randomly chosen slower-growing sample. An AUC of 0.5 indicates no discriminative ability, whereas values approaching 1.0 indicate strong classification performance.
+
+This analysis complements the regression framework by evaluating the practical ability of the replication-associated signal to identify high-growth phenotypes.
 
 
 
   ```{r packages}
-#install.packages('lubridate')
-pkgs <- c("dplyr","data.table","stringr","scales","tibble")
-for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
-library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+roc_curve <- function(y_true_binary, score) {
+  ord <- order(score, decreasing=TRUE)
+  y <- y_true_binary[ord]
+  s <- score[ord]
+  # thresholds at each unique score
+  thr <- unique(s)
+  tpr <- fpr <- numeric(length(thr))
+  
+  P <- sum(y==1); N <- sum(y==0)
+  for (i in seq_along(thr)) {
+    pred_pos <- s >= thr[i]
+    TP <- sum(pred_pos & (y==1))
+    FP <- sum(pred_pos & (y==0))
+    tpr[i] <- if (P>0) TP/P else NA_real_
+    fpr[i] <- if (N>0) FP/N else NA_real_
+  }
+  data.frame(fpr=fpr, tpr=tpr)
+}
+
+auc_trapz <- function(fpr, tpr) {
+  o <- order(fpr)
+  x <- fpr[o]; y <- tpr[o]
+  sum((x[-1]-x[-length(x)]) * (y[-1]+y[-length(y)]) / 2, na.rm=TRUE)
+}
+
+# Define "fast" as top quartile by observed growth_rate (change q if you want)
+q_fast <- 0.75
+thr_fast <- quantile(oof_all$growth_rate, probs=q_fast, na.rm=TRUE)
+oof_all$fast_label <- ifelse(oof_all$growth_rate >= thr_fast, 1, 0)
+
+roc <- roc_curve(oof_all$fast_label, oof_all$pred_oof)
+auc <- auc_trapz(roc$fpr, roc$tpr)
+cat("\nROC/AUC (fast = top", q_fast*100, "%): AUC =", auc, "\n")
+
+plot(roc$fpr, roc$tpr, type="l", lwd=2,
+     xlab="False Positive Rate", ylab="True Positive Rate",
+     main=paste0("ROC (fast=top ", q_fast*100, "%). AUC=", round(auc,3)))
+abline(0,1,lty=2)
 ```
 ## 19
+Prediction of growth rates for previously unlabeled samples
 
+To extend the predictive framework to samples without measured growth rates, we identified entries in which growth rate was coded with a sentinel value (growth_rate = 1), indicating missing or unknown measurements. Only samples with valid replication metrics (finite 
+𝛿
+ori
+δ
+ori
+	​
+
+ and 
+𝐴
+A) were retained for prediction.
+
+Predictions were generated using a tiered strategy. For all unknown samples, growth rate was first predicted using the model trained on the full dataset:
+
+growth_rate
+∼
+𝛿
+ori
+.
+growth_rate∼δ
+ori
+	​
+
+.
+
+Prediction intervals (95%) were computed to quantify uncertainty.
+
+For samples exhibiting a statistically significant circular signal (based on adjusted q-values), 
+  and provided that the high-confidence model was available, predictions were additionally computed using the model fitted on significant samples:
+
+growth_rate
+∼
+𝛿
+ori
++
+𝐴
+.
+growth_rate∼δ
+ori
+	​
+
++A.
+
+In such cases, the high-confidence model prediction was retained as the final estimate. 
+  This tiered approach prioritizes biologically reliable signals while maintaining predictions for all samples. 
+  The resulting output includes predicted growth rates, associated uncertainty intervals, and the source model used for each prediction.
 
 
   ```{r packages}
-#install.packages('lubridate')
-pkgs <- c("dplyr","data.table","stringr","scales","tibble")
-for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
-library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+
+unknown <- merged_results2 %>%
+  filter(!is.na(growth_rate), growth_rate == 1) %>%
+  filter(is.finite(delta_ori), is.finite(A))
+
+if (nrow(unknown) == 0) {
+  cat("\nNo unknown samples (growth_rate==1) found.\n")
+} else {
+  pred_all <- predict(fit_all, newdata=unknown, interval="prediction", level=0.95)
+  unknown$pred_all <- pred_all[, "fit"]
+  unknown$pred_all_lo <- pred_all[, "lwr"]
+  unknown$pred_all_hi <- pred_all[, "upr"]
+  
+  unknown$pred_final <- unknown$pred_all
+  unknown$pred_source <- "ALL_model"
+  
+  if (!is.null(fit_hp)) {
+    mask_hc <- !is.na(unknown$q_full) & unknown$q_full < 0.05
+    if (any(mask_hc)) {
+      pred_hp <- predict(fit_hp, newdata=unknown[mask_hc,], interval="prediction", level=0.95)
+      unknown$pred_final[mask_hc] <- pred_hp[, "fit"]
+      unknown$pred_source[mask_hc] <- "HIGH_CONF_model"
+    }
+  }
+  
+  cat("\n--- Unknown predictions (head) ---\n")
+  print(unknown %>%
+          select(sample_id, delta_ori, A, p_full, q_full,
+                 pred_final, pred_source, pred_all_lo, pred_all_hi) %>%
+          arrange(desc(pred_final)) %>% head(20))
+}
+
 ```
 ## 20
+Visualization of circular expression profiles
 
+To provide intuitive demonstrations of the circular modeling framework, representative example samples were selected from three categories: a fast-growing sample with a significant replication signal, a slow-growing or weak-signal sample, and (if available) a sample with unknown growth rate.
 
+For each selected sample, three complementary visualizations were generated:
+
+Expression vs. genomic angle — The binned mean logTPM values were plotted as a function of the angular genomic coordinate 
+𝜃
+θ, together with the fitted circular regression curve. Vertical lines indicate the angular positions of the replication origin (
+𝜃
+ori
+θ
+ori
+	​
+
+) and its opposite position (putative terminus), as well as the model-estimated maximum and minimum of the fitted wave.
+
+Polar representation — The same data were displayed in polar coordinates, illustrating the circular structure of the genome and the fitted sinusoidal gradient. This view emphasizes the spatial continuity of the replication-associated expression pattern.
+
+Prediction summary panel — For each sample, observed growth rate (if available), statistical significance of the circular fit, replication metrics (
+𝐴
+A, 
+𝛿
+δ, 
+𝛿
+ori
+δ
+ori
+	​
+
+), and predicted growth rate with confidence interval were summarized.
+
+These visual demonstrations highlight how the origin–terminus expression gradient translates into predicted growth rate and provide an intuitive link between the circular genomic model and the biological interpretation of replication-associated gene dosage effects.
+
+    ```{r visualizations}
+pick_examples <- function(known_df, unknown_df) {
+  fast_pool <- known_df %>% filter(!is.na(p_full) & p_full < 0.05)
+  if (nrow(fast_pool) == 0) fast_pool <- known_df
+  id_fast <- fast_pool$sample_id[which.max(fast_pool$growth_rate)]
+  
+  slow_pool <- known_df %>% filter(!is.na(p_full) & p_full > 0.2)
+  if (nrow(slow_pool) == 0) slow_pool <- known_df
+  score <- with(slow_pool, rank(A, ties.method="average") + rank(abs(delta_ori), ties.method="average"))
+  id_slow <- slow_pool$sample_id[which.min(score)]
+  
+  id_unk <- if (nrow(unknown_df) > 0) unknown_df$sample_id[1] else NA_character_
+  list(fast=id_fast, slow=id_slow, unknown=id_unk)
+}
+
+plot_sample_demo <- function(sid, bin_expr, merged_results2, theta_ori, fit_all, fit_hp=NULL, gate=c("p","q"),
+                             main_prefix="") {
+  gate <- match.arg(gate)
+  
+  # IMPORTANT FIX: use .data$sample_id == sid
+  df <- bin_expr %>% filter(.data$sample_id == sid)
+  if (nrow(df) == 0) { cat("No bins for:", sid, "\n"); return(invisible(NULL)) }
+  
+  rr <- merged_results2 %>% filter(.data$sample_id == sid)
+  if (nrow(rr) == 0) { cat("No result row for:", sid, "\n"); return(invisible(NULL)) }
+  rr <- rr[1, ]
+  
+  # fit circular model for plotting
+  fit <- lm(y ~ cos(theta_bin) + sin(theta_bin), data=df, weights=df$n_genes)
+  
+  th_grid <- seq(0, 2*pi, length.out=600)
+  yhat <- predict(fit, newdata=data.frame(theta_bin=th_grid))
+  
+  # regression predictions
+  pred_all <- predict(fit_all, newdata=data.frame(delta_ori=rr$delta_ori), interval="prediction", level=0.95)
+  pred_final <- pred_all[1,"fit"]; pred_lo <- pred_all[1,"lwr"]; pred_hi <- pred_all[1,"upr"]
+  source <- "ALL_model"
+  
+  if (!is.null(fit_hp)) {
+    gate_ok <- if (gate=="p") (!is.na(rr$p_full) && rr$p_full < 0.05) else (!is.na(rr$q_full) && rr$q_full < 0.05)
+    if (gate_ok) {
+      pred_hp <- predict(fit_hp, newdata=data.frame(delta_ori=rr$delta_ori, A=rr$A), interval="prediction", level=0.95)
+      pred_final <- pred_hp[1,"fit"]; pred_lo <- pred_hp[1,"lwr"]; pred_hi <- pred_hp[1,"upr"]
+      source <- paste0("HIGH_CONF (gate=", gate, ")")
+    }
+  }
+  
+  gr_obs <- rr$growth_rate
+  gr_label <- if (!is.na(gr_obs) && gr_obs != 1) sprintf("Observed growth_rate = %.3f", gr_obs) else "Observed growth_rate = NA (coded as 1)"
+  
+  # Panel layout: (1) y vs theta, (2) polar bins+fit, (3) summary text
+  oldpar <- par(no.readonly=TRUE); on.exit(par(oldpar), add=TRUE)
+  par(mfrow=c(1,3), mar=c(4,4,3,1))
+  
+  ## (1) y vs theta
+  o <- order(df$theta_bin)
+  df_o <- df[o,]
+  plot(df_o$theta_bin, df_o$y, pch=16, col="grey60",
+       xlab="theta (radians)", ylab="mean logTPM (bin)",
+       main=paste0(main_prefix, sid))
+  lines(th_grid, yhat, lwd=3)
+  abline(v=theta_ori, lty=2, lwd=2, col="darkgreen")
+  abline(v=(theta_ori+pi)%%(2*pi), lty=3, lwd=2, col="darkgreen")
+  if (!is.na(rr$theta_max)) abline(v=rr$theta_max, lty=2, col="black")
+  if (!is.na(rr$theta_min)) abline(v=rr$theta_min, lty=3, col="black")
+  legend("topright",
+         legend=c("bins","fit","ori","opp","theta_max","theta_min"),
+         lty=c(NA,1,2,3,2,3), pch=c(16,NA,NA,NA,NA,NA),
+         col=c("grey60","black","darkgreen","darkgreen","black","black"),
+         bty="n", cex=0.8)
+  
+  ## (2) polar view: plot bins as points + fitted curve as line
+  # scale to radius
+  r_fit <- (yhat - min(yhat)) / (max(yhat)-min(yhat) + 1e-12)
+  r_fit <- 0.25 + 0.75*r_fit
+  x_fit <- r_fit*cos(th_grid); y_fit <- r_fit*sin(th_grid)
+  
+  # bins scaled
+  yb <- df_o$y
+  r_bin <- (yb - min(yhat)) / (max(yhat)-min(yhat) + 1e-12)
+  r_bin <- pmin(pmax(0.25 + 0.75*r_bin, 0.1), 1.1)
+  x_bin <- r_bin*cos(df_o$theta_bin); y_bin <- r_bin*sin(df_o$theta_bin)
+  
+  plot(0,0,type="n", asp=1, xlim=c(-1.1,1.1), ylim=c(-1.1,1.1),
+       xlab="", ylab="", main="Polar: bins + fit")
+  t0 <- seq(0,2*pi,length.out=400)
+  lines(cos(t0), sin(t0), col="grey80")
+  points(x_bin, y_bin, pch=16, col="grey60", cex=0.7)
+  lines(x_fit, y_fit, lwd=3)
+  
+  points(cos(theta_ori), sin(theta_ori), pch=8, col="darkgreen", cex=1.2)
+  points(cos((theta_ori+pi)%%(2*pi)), sin((theta_ori+pi)%%(2*pi)), pch=4, col="darkgreen", cex=1.2)
+  
+  if (!is.na(rr$theta_max)) points(cos(rr$theta_max), sin(rr$theta_max), pch=16, col="black")
+  if (!is.na(rr$theta_min)) points(cos(rr$theta_min), sin(rr$theta_min), pch=1,  col="black")
+  
+  ## (3) summary
+  plot.new()
+  title(main="Prediction summary")
+  txt <- c(
+    gr_label,
+    sprintf("p_full=%.3g | q_full=%.3g", rr$p_full, rr$q_full),
+    sprintf("A=%.3f | delta=%.3f | delta_ori=%.3f", rr$A, rr$delta, rr$delta_ori),
+    "",
+    sprintf("Predicted growth_rate (%s):", source),
+    sprintf("  %.3f  [%.3f, %.3f]", pred_final, pred_lo, pred_hi),
+    "",
+    "Interpretation:",
+    "delta_ori > 0 => ori-side higher than opposite",
+    "larger delta_ori => stronger ori→ter gradient",
+    "=> predicts higher growth rate in these data"
+  )
+  text(0,1, adj=c(0,1), labels=paste(txt, collapse="\n"), cex=0.9)
+}
+
+ex_ids <- pick_examples(datasets$ALL, unknown)
+print(ex_ids)
+
+plot_sample_demo(ex_ids$fast,    bin_expr, merged_results2, theta_ori, fit_all, fit_hp, gate="p", main_prefix="FAST: ")
+plot_sample_demo(ex_ids$slow,    bin_expr, merged_results2, theta_ori, fit_all, fit_hp, gate="p", main_prefix="SLOW/FLAT: ")
+if (!is.na(ex_ids$unknown)) {
+  plot_sample_demo(ex_ids$unknown, bin_expr, merged_results2, theta_ori, fit_all, fit_hp, gate="p", main_prefix="UNKNOWN: ")
+} else {
+  cat("No unknown samples (growth_rate==1) found.\n")
+}
+
+```
 
   
   
