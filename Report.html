@@ -352,6 +352,95 @@ ori_pos <- (ori_row$start[1] + ori_row$end[1]) / 2
 theta_ori <- (2*pi*(ori_pos %% L))/L
 cat("theta_ori (radians):", theta_ori, "\n")
 ``` 
+## Peak angles and directionality check
+
+At this stage we have already identified, for each sample, the peak location of the fitted replication-related pattern ($\theta_{max}$) and we restrict the analysis to samples with a significant full model ($q_{full} < 0.05$). The key question is whether these peak angles are randomly distributed along the circular chromosome or show a consistent preferred direction relative to the replication origin. The Rayleigh test strongly rejects the hypothesis of a uniform angular distribution, indicating that the peaks are not random but instead concentrate around a specific direction. However, the directed V-tests show that this concentration is not toward our oriC reference angle $\theta_{ori}$, but rather toward the opposite direction $\theta_{ori}+\pi$. In other words, the fitted “peak direction” is systematically shifted by approximately half a chromosome relative to the origin anchor.
+This empirical result matters for the downstream quantification of the origin–terminus contrast: it implies that a naive definition based on the fitted maximum/minimum locations (e.g., using $\theta_{max}$ and $\theta_{min}$) would not reliably represent an ori-centered replication gradient in this dataset. Therefore, before proceeding to any technical derivation, these directionality tests motivate an explicit ori-anchored contrast that compares expression at $\theta_{ori}$ versus $\theta_{ori}+\pi$.
+
+```{r Rayleigh and V- Test}
+
+if (!requireNamespace("circular", quietly = TRUE)) install.packages("circular")
+if (!requireNamespace("CircStats", quietly = TRUE)) install.packages("CircStats")
+library(circular)
+library(CircStats)
+
+sig_q <- !is.na(results$q_full) & results$q_full < 0.05 # We use only BH-significant samples from the full model
+
+th <- (results$theta_max[sig_q]) %% (2*pi) # We need to transform the indormation in a circular form.
+
+mu_ori <- (theta_ori) %% (2*pi)
+mu_opp <- (mu_ori+pi) %% (2*pi)
+
+ray <- circular::rayleigh.test(circular(th, units = "radians", modulo = "2pi")) #We perform the tests
+vt_ori <- CircStats::v0.test(th, mu0 = mu_ori, degree = FALSE)
+vt_opp <- CircStats::v0.test(th, mu0 = mu_opp, degree = FALSE)
+
+mu_hat <- atan2(mean(sin(th)), mean(cos(th))) %% (2*pi)
+Rbar  <- sqrt(mean(cos(th))^2 + mean(sin(th))^2)
+
+V_ori <- sum(cos(th - mu_ori)); rbar_ori <- V_ori / length(th)
+V_opp <- sum(cos(th - mu_opp)); rbar_opp <- V_opp / length(th)
+
+tibble(
+  n_sig = length(th),
+  theta_ori = mu_ori,
+  theta_opp = mu_opp,
+  mu_hat = mu_hat,
+  Rbar = Rbar,
+  rayleigh_p = unname(ray$p.value),
+  V_ori = V_ori,
+  rbar_ori = rbar_ori,
+  p_ori = unname(vt_ori$p.value),
+  V_opp = V_opp,
+  rbar_opp = rbar_opp,
+  p_opp = unname(vt_opp$p.value)
+)
+```
+
+
+## Correction step
+To obtain a biologically anchored estimate, we redefined the contrast directly on the fitted model as the difference between the predicted expression at the origin and at the antipodal position:
+$$\Delta_{ori}=y(\theta_{ori})-y(\theta_{ori}+\pi)= 2(\beta\cos{\theta_{ori}}+\gamma\sin{\theta_{ori}}$$
+which preserves the sign (ori higher vs opposite higher) and enforces a consistent ori-based reference across samples.
+
+```{r Delta correction}
+results <- results %>%
+  mutate(
+    delta_ori = 2 * (beta*cos(theta_ori) + gamma*sin(theta_ori)),
+    delta_opp = -delta_ori
+  )
+
+merged_results <- merged_results %>%
+  dplyr::left_join(
+    dplyr::select(results, sample_id, delta_ori, delta_opp),
+    by = "sample_id"
+  )
+
+sig_q <- !is.na(results$q_full) & results$q_full < 0.05
+
+delta_summary <- results %>%
+  filter(sig_q) %>%
+  summarise(
+    n_sig = n(),
+    median_delta_naive = median(delta, na.rm=TRUE),     # delta = 2A (max–min)
+    median_delta_ori   = median(delta_ori, na.rm=TRUE), # ori-anchored contrast
+    cor_naive_vs_ori   = cor(delta, delta_ori, use="complete.obs"),
+    prop_delta_ori_pos = mean(delta_ori > 0, na.rm=TRUE),
+    prop_delta_ori_neg = mean(delta_ori < 0, na.rm=TRUE)
+  )
+
+cat("\n### Delta contrast summary (q_full < 0.05)\n")
+delta_summary
+
+cat("\n### Example rows: naive delta (2A) vs corrected delta_ori\n")
+
+results %>%
+  dplyr::filter(sig_q) %>%
+  dplyr::select(sample_id, q_full, A, delta, delta_ori) %>%
+  dplyr::arrange(q_full) %>%
+  head(10)
+```
+	
 ## 13 Integration with measured growth rates
 
 To evaluate the biological relevance of the inferred replication-associated expression signal, we integrated the circular model results with experimentally measured growth rates. 
