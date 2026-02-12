@@ -519,113 +519,110 @@ abline(h=0, v=0, lty=3)
 
 par(mfrow=c(1,1))
 ```
-## 15 Cross-validation of predictive models
+## Cross-validation of predictive models
 
-To evaluate the predictive performance of replication-associated expression metrics, we performed repeated k-fold cross-validation using linear regression models. 
-    Three datasets were considered: (i) all samples with valid growth-rate measurements, (ii) samples exhibiting a statistically significant circular signal based on nominal p-values, 
-    and (iii) samples significant after false discovery rate correction.
-We compared multiple candidate models in which growth rate was regressed against different combinations of replication metrics, including the naive amplitude-based contrast 
-𝛿 = 2 𝐴 δ=2A, the origin-aligned contrast 𝛿 ori δ ori , the fitted amplitude  𝐴 A, and combinations thereof.
+To quantify how informative the replication-related metrics are about bacterial growth, we framed the problem as a prediction task: given a sample’s replication signal estimated from the circular model, can we predict its measured growth rate $\mu$ (1/hr)? We evaluated simple linear regression models because the project’s theoretical expectation suggests an approximately monotonic relationship between copy-number gradients and growth, and linear models are interpretable and allow a clean comparison between alternative replication metrics.
 
-For each dataset and model specification, we conducted repeated 5-fold cross-validation (50 repetitions). 
-    In each repetition, samples were randomly partitioned into five folds; models were trained on four folds and evaluated on the held-out fold. 
-    Predictions from all folds were aggregated to compute performance metrics, including:
+We compared four model specifications:
 
-Root Mean Squared Error (RMSE),
+- $m_A$: $\mu \sim A$, where $A=\sqrt{\beta^2+\gamma^2}$ is the fitted amplitude (effect size) of the sinusoid.
+- $m_\Delta$: $\mu \sim \Delta$, where $\Delta = 2A$ is the naive peak-to-trough contrast of the fitted sinusoid (phase-free).
+- $m_{\Delta_{\mathrm{ori}}}$: $\mu \sim \Delta_{\mathrm{ori}}$, where 
+  $$\Delta_{\mathrm{ori}} = y(\theta_{\mathrm{ori}})-y(\theta_{\mathrm{ori}}+\pi)=2\big(\beta\cos\theta_{\mathrm{ori}}+\gamma\sin\theta_{\mathrm{ori}}\big)$$
+  is the ori-anchored contrast (signed), directly addressing the biological question “origin vs opposite/terminus”.
+- $m_{\Delta_{\mathrm{ori}}+A}$: $\mu \sim \Delta_{\mathrm{ori}} + A$, to test whether adding “overall signal strength” ($A$) improves prediction beyond the ori-anchored contrast.
 
-Mean Absolute Error (MAE),
+Because $\Delta = 2A$, models $m_A$ and $m_\Delta$ are expected to behave identically (up to rescaling), and are effectively two views of the same phase-free effect-size information.
 
-Coefficient of determination ( 𝑅 2 R 2 ),
+Then, to estimate out-of-sample performance, we used repeated 5-fold cross-validation (50 repetitions). In each repetition, samples were randomly split into 5 folds; each fold was predicted by a model trained on the other 4 folds, and predictions were pooled across folds to compute performance metrics. We report:
 
-Pearson and Spearman correlation between predicted and observed growth rates. 
-This repeated cross-validation framework provides a robust estimate of out-of-sample predictive performance and reduces variability due to random fold assignment. 
-    Model performance was summarized across repetitions, and RMSE distributions were visualized to compare competing model specifications.
+- RMSE: $\sqrt{\frac{1}{n}\sum_i(\mu_i-\hat{\mu}_i)^2}$  
+- MAE: $\frac{1}{n}\sum_i|\mu_i-\hat{\mu}_i|$  
+- $R^2$: $1-\frac{\sum_i(\mu_i-\hat{\mu}_i)^2}{\sum_i(\mu_i-\bar{\mu})^2}$
 
-```{r cross validation}
+We evaluated performance on two datasets: First , all samples with valid growth-rate measurements (excluding the sentinel value $\mu=1$ used for missing growth rates), and the second one sig\_q: the subset with a statistically supported circular signal ($q_{\mathrm{full}}<0.05$).
+  In the full dataset, the ori-anchored contrast $\Delta_{\mathrm{ori}}$ provides measurable predictive value (positive $R^2$), whereas phase-free effect-size predictors ($A$ or $\Delta$) perform worse than predicting the mean growth rate (negative $R^2$). This indicates that, once phase is ignored, “how strong the wave is” does not reliably map to growth across heterogeneous conditions; anchoring the contrast to ori carries substantially more growth-relevant information.
+  
+  Restricting to samples with a clear circular replication signal strengthens the relationship: $\Delta_{\mathrm{ori}}$ explains a substantial fraction of out-of-sample variance ($R^2 \approx 0.59$). Adding $A$ slightly worsens performance, suggesting that once the contrast is correctly oriented (ori vs opposite), additional “overall amplitude” does not add independent predictive information and may introduce noise given the small sample size.
 
+These results are consistent with the earlier directionality analysis: in this dataset the fitted peak location is not reliably aligned with $\theta_{\mathrm{ori}}$, so phase-free metrics ($A$ or $\Delta$) are not appropriate proxies for an origin–terminus gradient. In contrast, $\Delta_{\mathrm{ori}}$ directly measures the fitted expression difference between ori and the opposite genomic position, preserving direction and remaining interpretable even when the peak is shifted. Therefore, in the remainder of the analysis we treat $\Delta_{\mathrm{ori}}$ as the primary replication signal when relating the fitted sinusoid to growth rate.
+
+```{r cross_validation}
+# datasets
+mask_q <- !is.na(known$q_full) & known$q_full < 0.05
 datasets <- list(
-  ALL     = known,
-  sig_by_p = known %>% filter(mask_p),
-  sig_by_q = known %>% filter(mask_q)
+  ALL = known,
+  sig_q = known[mask_q, , drop = FALSE]
 )
 
-model_specs <- list(
-  m1_delta_ori      = growth_rate ~ delta_ori,
-  m2_delta          = growth_rate ~ delta,
-  m3_A              = growth_rate ~ A,
-  m4_delta_ori_A    = growth_rate ~ delta_ori + A,
-  m5_delta_ori_delta= growth_rate ~ delta_ori + delta
+# models (keep it small and interpretable)
+models <- list(
+  delta_ori   = growth_rate ~ delta_ori,
+  delta       = growth_rate ~ delta,
+  A           = growth_rate ~ A,
+  delta_ori_A = growth_rate ~ delta_ori + A
 )
 
-cv_repeated <- function(df, formula, k=5, R=50, seed=123) {
+# repeated 5-fold CV
+cv_rep <- function(df, form, k = 5, R = 50, seed = 1) {
   set.seed(seed)
   n <- nrow(df)
   out <- vector("list", R)
-  
+
   for (r in seq_len(R)) {
-    fold_id <- sample(rep(seq_len(k), length.out=n))
-    y_true <- numeric(0); y_pred <- numeric(0)
-    
-    for (fold in seq_len(k)) {
-      train <- df[fold_id != fold, , drop=FALSE]
-      test  <- df[fold_id == fold, , drop=FALSE]
-      fit <- lm(formula, data=train)
-      pred <- predict(fit, newdata=test)
-      y_true <- c(y_true, test$growth_rate)
-      y_pred <- c(y_pred, pred)
+    fold <- sample(rep(seq_len(k), length.out = n))
+    y <- df$growth_rate
+    pred <- rep(NA_real_, n)
+
+    for (f in seq_len(k)) {
+      fit <- lm(form, data = df[fold != f, , drop = FALSE])
+      pred[fold == f] <- predict(fit, newdata = df[fold == f, , drop = FALSE])
     }
-    
-    resid <- y_true - y_pred
-    rmse <- sqrt(mean(resid^2, na.rm=TRUE))
-    mae  <- mean(abs(resid), na.rm=TRUE)
-    ss_res <- sum(resid^2, na.rm=TRUE)
-    ss_tot <- sum((y_true - mean(y_true, na.rm=TRUE))^2, na.rm=TRUE)
-    r2 <- 1 - ss_res/ss_tot
-    
-    out[[r]] <- tibble(
-      RMSE=rmse, MAE=mae, R2=r2,
-      corP=suppressWarnings(cor(y_true,y_pred, use="complete.obs", method="pearson")),
-      corS=suppressWarnings(cor(y_true,y_pred, use="complete.obs", method="spearman"))
-    )
+
+    res <- y - pred
+    rmse <- sqrt(mean(res^2, na.rm = TRUE))
+    mae  <- mean(abs(res), na.rm = TRUE)
+    r2   <- 1 - sum(res^2, na.rm = TRUE) / sum((y - mean(y, na.rm = TRUE))^2, na.rm = TRUE)
+
+    out[[r]] <- tibble(RMSE = rmse, MAE = mae, R2 = r2)
   }
-  bind_rows(out)
+
+  dplyr::bind_rows(out)
 }
 
-cv_results <- list()
-for (ds_name in names(datasets)) {
-  for (m_name in names(model_specs)) {
-    cat("\nRunning CV:", ds_name, "|", m_name, "| n =", nrow(datasets[[ds_name]]), "\n")
-    cv_results[[paste(ds_name,m_name,sep="__")]] <-
-      cv_repeated(datasets[[ds_name]], model_specs[[m_name]]) %>%
-      mutate(dataset=ds_name, model=m_name, n=nrow(datasets[[ds_name]]))
+# run CV
+cv_all <- list()
+for (ds in names(datasets)) {
+  for (m in names(models)) {
+    cv_all[[paste(ds, m, sep = "__")]] <-
+      cv_rep(datasets[[ds]], models[[m]]) %>%
+      dplyr::mutate(dataset = ds, model = m, n = nrow(datasets[[ds]]))
   }
 }
-cv_results_df <- bind_rows(cv_results)
+cv_df <- dplyr::bind_rows(cv_all)
 
-cv_summary <- cv_results_df %>%
-  group_by(dataset, model, n) %>%
-  summarise(
-    RMSE_mean=mean(RMSE), RMSE_sd=sd(RMSE),
-    MAE_mean=mean(MAE),   MAE_sd=sd(MAE),
-    R2_mean=mean(R2),     R2_sd=sd(R2),
-    corP_mean=mean(corP, na.rm=TRUE),
-    corS_mean=mean(corS, na.rm=TRUE),
-    .groups="drop"
+# summary table (main deliverable)
+cv_summary <- cv_df %>%
+  dplyr::group_by(dataset, model, n) %>%
+  dplyr::summarise(
+    RMSE = mean(RMSE, na.rm = TRUE),
+    MAE  = mean(MAE,  na.rm = TRUE),
+    R2   = mean(R2,   na.rm = TRUE),
+    .groups = "drop"
   ) %>%
-  arrange(dataset, RMSE_mean)
+  dplyr::arrange(dataset, RMSE)
 
-print(cv_summary)
+cv_summary
 
-# RMSE boxplots
-par(mfrow=c(length(datasets),1), mar=c(4,4,2,1))
-for (ds_name in names(datasets)) {
-  sub <- cv_results_df %>% filter(dataset==ds_name)
-  boxplot(RMSE ~ model, data=sub, las=2,
-          main=paste("RMSE (repeated CV) -", ds_name),
-          ylab="RMSE", col="grey90", border="grey60")
-}
-par(mfrow=c(1,1))
+# RMSE distributions (compact visual comparison)
+par(mfrow = c(1, 2), mar = c(6, 4, 2, 1))
+boxplot(RMSE ~ model, data = cv_df[cv_df$dataset == "ALL", ],
+        las = 2, main = "RMSE (CV) - ALL", ylab = "RMSE")
+boxplot(RMSE ~ model, data = cv_df[cv_df$dataset == "sig_q", ],
+        las = 2, main = "RMSE (CV) - q_full<0.05", ylab = "RMSE")
+par(mfrow = c(1, 1))
 ```
+			
 ## 16
 Final model fitting
 Based on cross-validation results, a final linear model was fitted using the full dataset:
