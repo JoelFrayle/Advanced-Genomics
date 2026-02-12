@@ -434,9 +434,168 @@ analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (ALL
 analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (sig_by_p)", use_mask=mask_p)
 analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (sig_by_q)", use_mask=mask_q)
 ``` 
-## 15
+## 15 Cross-validation of predictive models
+
+To evaluate the predictive performance of replication-associated expression metrics, we performed repeated k-fold cross-validation using linear regression models. 
+    Three datasets were considered: (i) all samples with valid growth-rate measurements, (ii) samples exhibiting a statistically significant circular signal based on nominal p-values, 
+    and (iii) samples significant after false discovery rate correction.
+We compared multiple candidate models in which growth rate was regressed against different combinations of replication metrics, including the naive amplitude-based contrast 
+𝛿 = 2 𝐴 δ=2A, the origin-aligned contrast 𝛿 ori δ ori , the fitted amplitude  𝐴 A, and combinations thereof.
+
+For each dataset and model specification, we conducted repeated 5-fold cross-validation (50 repetitions). 
+    In each repetition, samples were randomly partitioned into five folds; models were trained on four folds and evaluated on the held-out fold. 
+    Predictions from all folds were aggregated to compute performance metrics, including:
+
+Root Mean Squared Error (RMSE),
+
+Mean Absolute Error (MAE),
+
+Coefficient of determination ( 𝑅 2 R 2 ),
+
+Pearson and Spearman correlation between predicted and observed growth rates. 
+This repeated cross-validation framework provides a robust estimate of out-of-sample predictive performance and reduces variability due to random fold assignment. 
+    Model performance was summarized across repetitions, and RMSE distributions were visualized to compare competing model specifications.
+
+```{r cross validation}
+
+datasets <- list(
+  ALL     = known,
+  sig_by_p = known %>% filter(mask_p),
+  sig_by_q = known %>% filter(mask_q)
+)
+
+model_specs <- list(
+  m1_delta_ori      = growth_rate ~ delta_ori,
+  m2_delta          = growth_rate ~ delta,
+  m3_A              = growth_rate ~ A,
+  m4_delta_ori_A    = growth_rate ~ delta_ori + A,
+  m5_delta_ori_delta= growth_rate ~ delta_ori + delta
+)
+
+cv_repeated <- function(df, formula, k=5, R=50, seed=123) {
+  set.seed(seed)
+  n <- nrow(df)
+  out <- vector("list", R)
+  
+  for (r in seq_len(R)) {
+    fold_id <- sample(rep(seq_len(k), length.out=n))
+    y_true <- numeric(0); y_pred <- numeric(0)
+    
+    for (fold in seq_len(k)) {
+      train <- df[fold_id != fold, , drop=FALSE]
+      test  <- df[fold_id == fold, , drop=FALSE]
+      fit <- lm(formula, data=train)
+      pred <- predict(fit, newdata=test)
+      y_true <- c(y_true, test$growth_rate)
+      y_pred <- c(y_pred, pred)
+    }
+    
+    resid <- y_true - y_pred
+    rmse <- sqrt(mean(resid^2, na.rm=TRUE))
+    mae  <- mean(abs(resid), na.rm=TRUE)
+    ss_res <- sum(resid^2, na.rm=TRUE)
+    ss_tot <- sum((y_true - mean(y_true, na.rm=TRUE))^2, na.rm=TRUE)
+    r2 <- 1 - ss_res/ss_tot
+    
+    out[[r]] <- tibble(
+      RMSE=rmse, MAE=mae, R2=r2,
+      corP=suppressWarnings(cor(y_true,y_pred, use="complete.obs", method="pearson")),
+      corS=suppressWarnings(cor(y_true,y_pred, use="complete.obs", method="spearman"))
+    )
+  }
+  bind_rows(out)
+}
+
+cv_results <- list()
+for (ds_name in names(datasets)) {
+  for (m_name in names(model_specs)) {
+    cat("\nRunning CV:", ds_name, "|", m_name, "| n =", nrow(datasets[[ds_name]]), "\n")
+    cv_results[[paste(ds_name,m_name,sep="__")]] <-
+      cv_repeated(datasets[[ds_name]], model_specs[[m_name]]) %>%
+      mutate(dataset=ds_name, model=m_name, n=nrow(datasets[[ds_name]]))
+  }
+}
+cv_results_df <- bind_rows(cv_results)
+
+cv_summary <- cv_results_df %>%
+  group_by(dataset, model, n) %>%
+  summarise(
+    RMSE_mean=mean(RMSE), RMSE_sd=sd(RMSE),
+    MAE_mean=mean(MAE),   MAE_sd=sd(MAE),
+    R2_mean=mean(R2),     R2_sd=sd(R2),
+    corP_mean=mean(corP, na.rm=TRUE),
+    corS_mean=mean(corS, na.rm=TRUE),
+    .groups="drop"
+  ) %>%
+  arrange(dataset, RMSE_mean)
+
+print(cv_summary)
+
+# RMSE boxplots
+par(mfrow=c(length(datasets),1), mar=c(4,4,2,1))
+for (ds_name in names(datasets)) {
+  sub <- cv_results_df %>% filter(dataset==ds_name)
+  boxplot(RMSE ~ model, data=sub, las=2,
+          main=paste("RMSE (repeated CV) -", ds_name),
+          ylab="RMSE", col="grey90", border="grey60")
+}
+par(mfrow=c(1,1))
+```
+## 16
+Final model fitting
+Based on cross-validation results, a final linear model was fitted using the full dataset:
+growth_rate ∼ 𝛿 ori . growth_rate∼δ ori .
+
+In addition, a high-confidence model was fitted using only samples with a statistically significant circular signal (based on nominal p-values), 
+    provided that the sample size was sufficient. In this subset, growth rate was modeled as a function of both the origin-aligned contrast and the fitted amplitude:
+growth_rate ∼ 𝛿 ori + 𝐴. growth_rate∼δ ori +A.
+Model summaries were examined to assess coefficient estimates, statistical significance, and explained variance. 
+    These final models provide an interpretable relationship between replication-associated expression gradients and cellular growth rate.
+
+    ```{r final model fitting}
+
+fit_all <- lm(growth_rate ~ delta_ori, data=datasets$ALL)
+
+# "High-confidence" model: prefer sig_by_p due to larger n than sig_by_q
+fit_hp  <- NULL
+if (nrow(datasets$sig_by_p) >= 20) {
+  fit_hp <- lm(growth_rate ~ delta_ori + A, data=datasets$sig_by_p)
+}
+
+cat("\n--- fit_all summary ---\n"); print(summary(fit_all))
+if (!is.null(fit_hp)) { cat("\n--- fit_hp summary (sig_by_p) ---\n"); print(summary(fit_hp)) }
+```
+## 17
 
 
+  ```{r packages}
+#install.packages('lubridate')
+pkgs <- c("dplyr","data.table","stringr","scales","tibble")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+```
+
+## 18
+
+
+
+  ```{r packages}
+#install.packages('lubridate')
+pkgs <- c("dplyr","data.table","stringr","scales","tibble")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+```
+## 19
+
+
+
+  ```{r packages}
+#install.packages('lubridate')
+pkgs <- c("dplyr","data.table","stringr","scales","tibble")
+for (p in pkgs) if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
+library(dplyr); library(data.table); library(stringr); library(scales); library(tibble)
+```
+## 20
 
 
 
