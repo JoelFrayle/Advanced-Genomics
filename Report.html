@@ -2,7 +2,12 @@
 title: "Report Advanced Genomics"
 author: "Joel Frayle Moreno- Francesco Mazza"
 date: "2026-02-11"
-output: html_document
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+    number_sections: true
 ---
 
 ```{r setup, include=FALSE}
@@ -616,12 +621,35 @@ cv_summary <- cv_df %>%
 cv_summary
 
 # RMSE distributions (compact visual comparison)
-par(mfrow = c(1, 2), mar = c(6, 4, 2, 1))
-boxplot(RMSE ~ model, data = cv_df[cv_df$dataset == "ALL", ],
-        las = 2, main = "RMSE (CV) - ALL", ylab = "RMSE")
-boxplot(RMSE ~ model, data = cv_df[cv_df$dataset == "sig_q", ],
-        las = 2, main = "RMSE (CV) - q_full<0.05", ylab = "RMSE")
-par(mfrow = c(1, 1))
+library(ggplot2)
+library(dplyr)
+
+cv_df$model <- factor(cv_df$model,
+                      levels = c("A","delta","delta_ori","delta_ori_A"))
+
+p <- cv_df %>%
+  filter(dataset %in% c("ALL","sig_q")) %>%
+  mutate(dataset = ifelse(dataset=="ALL",
+                          "ALL samples",
+                          "Significant (q < 0.05)")) %>%
+  ggplot(aes(x=model, y=RMSE, fill=model)) +
+  geom_boxplot(alpha=0.8, outlier.alpha=0.3) +
+  facet_wrap(~dataset, scales="free_y") +
+  scale_fill_brewer(palette="Blues") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position="none",
+    axis.text.x = element_text(angle=45, hjust=1),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Model comparison via repeated cross-validation",
+    y = "RMSE",
+    x = "Model"
+  )
+
+print(p)
+
 ```
 
 ## Final model fitting
