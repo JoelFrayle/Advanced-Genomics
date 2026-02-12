@@ -352,3 +352,93 @@ ori_pos <- (ori_row$start[1] + ori_row$end[1]) / 2
 theta_ori <- (2*pi*(ori_pos %% L))/L
 cat("theta_ori (radians):", theta_ori, "\n")
 ``` 
+## 13 Integration with measured growth rates
+
+To evaluate the biological relevance of the inferred replication-associated expression signal, we integrated the circular model results with experimentally measured growth rates. 
+  The growth-rate column was identified either manually or automatically by detecting metadata fields containing the term “growth” and prioritizing those indicating rates (e.g., expressed in 1/hr). 
+  The selected column was converted to numeric format for downstream analysis.
+Samples lacking valid growth-rate measurements were excluded. In addition, entries with a sentinel value of 1 were removed, as this value did not represent a biologically meaningful measurement. Only samples with finite estimates of the replication metrics 
+  (amplitude 𝐴 A, naive contrast  𝛿 = 2 𝐴 δ=2A, and origin-aligned contrast 𝛿 ori δ ori ) were retained for analysis.
+Significance masks were defined based on the F-test from the circular regression model, using both nominal p-values and Benjamini–Hochberg adjusted q-values (threshold 0.05).
+
+```{r growth rate}
+  detect_growth_col <- function(df) {
+  cand <- names(df)[grepl("growth", tolower(names(df)))]
+  if (length(cand) == 0) return(NA_character_)
+  # prefer ones that look like rate (1/hr)
+  cand2 <- cand[grepl("1/hr|rate", tolower(cand))]
+  if (length(cand2) > 0) return(cand2[1])
+  cand[1]
+}
+
+gr_col <- "Growth Rate (1/hr)"
+if (!(gr_col %in% names(merged_results))) {
+  auto <- detect_growth_col(merged_results)
+  if (is.na(auto)) stop("Growth-rate column not found. Set gr_col manually.")
+  gr_col <- auto
+  cat("Auto-detected growth-rate column as:", gr_col, "\n")
+}
+
+merged_results2 <- merged_results %>%
+  mutate(growth_rate = suppressWarnings(as.numeric(.data[[gr_col]])))
+
+known <- merged_results2 %>%
+  filter(!is.na(growth_rate), growth_rate != 1) %>%      # exclude sentinel "1"
+  filter(is.finite(delta_ori), is.finite(delta), is.finite(A))
+mask_q <- !is.na(known$q_full) & known$q_full < 0.05
+
+``` 
+## 14 Correlation analysis between replication signal and growth rate
+
+To assess the relationship between replication-associated expression gradients and cellular growth, 
+  we computed both Pearson and Spearman correlation coefficients between growth rate and the inferred replication metrics.
+We first evaluated the naive amplitude-based measure, 
+  
+  DELTA = 2 A 
+
+  which corresponds to the maximal difference of the fitted sinusoid. We then analyzed the origin-aligned contrast,
+
+  VEDI EQUAZIONE 
+
+  which specifically quantifies the fitted expression difference between the replication origin and the terminus.
+
+Correlations were computed across all samples and separately restricted to samples exhibiting a statistically significant circular signal, 
+  based on either nominal p-values or false discovery rate–adjusted q-values. Scatter plots were generated to visualize these relationships, 
+  with points colored according to model significance.
+This analysis provides a direct test of whether the strength of the replication-associated expression gradient predicts cellular growth rate, 
+  as expected under gene-dosage effects during exponential replication.
+
+```{r correlation}
+analyze_corr <- function(df, xvar, yvar="growth_rate", title="", use_mask=NULL) {
+  d <- df
+  if (!is.null(use_mask)) d <- d[use_mask, , drop=FALSE]
+  x <- d[[xvar]]; y <- d[[yvar]]
+  
+  cat("\n---", title, "---\n")
+  cat("n =", sum(complete.cases(x,y)), "\n")
+  cat("Pearson :", cor(x,y, use="complete.obs", method="pearson"), "\n")
+  cat("Spearman:", cor(x,y, use="complete.obs", method="spearman"), "\n")
+  
+  cols <- col_q_fun(pmin(pmax(d$q_full, 0), 1))
+  sigq <- !is.na(d$q_full) & d$q_full < 0.05
+  
+  plot(x, y, pch=16, col=cols,
+       cex=ifelse(sigq, 1.2, 0.8),
+       xlab=xvar, ylab=yvar, main=title)
+  points(x[sigq], y[sigq], pch=21, bg=cols[sigq], col="black", cex=1.2)
+  abline(h=0, v=0, lty=3)
+}
+
+analyze_corr(known, "delta",     title="Naive: delta=2A vs growth_rate (ALL)")
+analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (ALL)")
+analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (sig_by_p)", use_mask=mask_p)
+analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (sig_by_q)", use_mask=mask_q)
+``` 
+## 15
+
+
+
+
+
+  
+  
