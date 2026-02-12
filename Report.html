@@ -9,7 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-### Project number 5: DNA replication introduces copy number variations that are detectable in RNA-seq
+# Project number 5: DNA replication introduces copy number variations that are detectable in RNA-seq
 
 We have to install and run the required packages:
 
@@ -312,7 +312,7 @@ hist(phi_02pi[sig_full], breaks=30,
      xlab="phi (radians)")
 ```
 
-## 9) Merge metadata
+## Merge metadata
 ```{r Merge}
 
 i <- which(names(meta_df) == "")[1]
@@ -332,11 +332,11 @@ To anchor the circular expression model to a biologically meaningful reference p
   In *E. coli*, the dnaA gene is located immediately adjacent to oriC and was therefore used as a proxy for the origin position. 
   The dnaA locus was identified from the genome annotation, and its midpoint was computed as:
 
-$$\text{ori\_pos} = \frac{\text{start}_{\text{dnaA}} + \text{end}_{\text{dnaA}}}{2}.$$
+$$ori_{pos} = \frac{\text{start}_{\text{dnaA}} + \text{end}_{\text{dnaA}}}{2}.$$
 
 This genomic coordinate was then mapped onto the circular genome using:
 
-$$ \theta_{\text{ori}} = \frac{2\pi \cdot (\text{ori\_pos} \bmod L)}{L}, $$
+$$ \theta_{\text{ori}} = \frac{2\pi \cdot (ori_{pos} \equiv L)}{L}$$
 
 where \( L \) is the chromosome length. 
   The resulting angular coordinate defines the position of oriC within the circular regression framework and enables computation of the origin–terminus expression contrast.
@@ -351,7 +351,8 @@ if (nrow(ori_row) == 0) {
 ori_pos <- (ori_row$start[1] + ori_row$end[1]) / 2
 theta_ori <- (2*pi*(ori_pos %% L))/L
 cat("theta_ori (radians):", theta_ori, "\n")
-``` 
+```
+
 ## Peak angles and directionality check
 
 At this stage we have already identified, for each sample, the peak location of the fitted replication-related pattern ($\theta_{max}$) and we restrict the analysis to samples with a significant full model ($q_{full} < 0.05$). The key question is whether these peak angles are randomly distributed along the circular chromosome or show a consistent preferred direction relative to the replication origin. The Rayleigh test strongly rejects the hypothesis of a uniform angular distribution, indicating that the peaks are not random but instead concentrate around a specific direction. However, the directed V-tests show that this concentration is not toward our oriC reference angle $\theta_{ori}$, but rather toward the opposite direction $\theta_{ori}+\pi$. In other words, the fitted “peak direction” is systematically shifted by approximately half a chromosome relative to the origin anchor.
@@ -400,7 +401,7 @@ tibble(
 
 ## Correction step
 To obtain a biologically anchored estimate, we redefined the contrast directly on the fitted model as the difference between the predicted expression at the origin and at the antipodal position:
-$$\Delta_{ori}=y(\theta_{ori})-y(\theta_{ori}+\pi)= 2(\beta\cos{\theta_{ori}}+\gamma\sin{\theta_{ori}}$$
+$$\Delta_{ori}=y(\theta_{ori})-y(\theta_{ori}+\pi)= 2(\beta\cos{\theta_{ori}}+\gamma\sin{\theta_{ori}})$$
 which preserves the sign (ori higher vs opposite higher) and enforces a consistent ori-based reference across samples.
 
 ```{r Delta correction}
@@ -440,7 +441,6 @@ results %>%
   dplyr::arrange(q_full) %>%
   head(10)
 ```
-	
 ## Integration with measured growth rates
 
 To evaluate whether the replication-associated expression gradient scales with bacterial growth, we integrated the growth-rate metadata provided for each sample. Growth rate was taken directly from the metadata column “Growth Rate (1/hr)” and converted to numeric. As indicated in the dataset documentation, samples with growth rate equal to 1 correspond to missing measurements and were excluded from downstream analyses. We further restricted the dataset to samples with finite estimates of the fitted effect size (A), the naive amplitude contrast ($\Delta=2A$), and the ori-anchored contrast ($\Delta_{ori}$). Finally, we defined the subset of statistically supported patterns using the BH-adjusted significance threshold on the full model ($q_{full}<0.05$), which is used in the subsequent association analyses with growth rate.
@@ -470,6 +470,7 @@ known %>%
   dplyr::arrange(growth_rate) %>%
   head(10)
 ```
+
 ## Correlation analysis between replication signal and growth rate
 
 Using the samples with measured growth rate (known), we tested whether the replication-associated signal scales with growth by correlating growth rate with (i) the naive amplitude contrast $\Delta=2A$ and (ii) the ori-anchored contrast $\Delta_{ori}$ defined above. Correlations were computed on all samples with growth-rate measurements and on the subset of samples with a significant circular signal ($q<0.05$).
@@ -622,7 +623,7 @@ boxplot(RMSE ~ model, data = cv_df[cv_df$dataset == "sig_q", ],
         las = 2, main = "RMSE (CV) - q_full<0.05", ylab = "RMSE")
 par(mfrow = c(1, 1))
 ```
-			
+
 ## Final model fitting
 Based on the cross-validation results, we retained the simplest and best-performing specification and fitted the final model on the full dataset $growth_rate \sim \Delta_{ori}$.
 
@@ -641,203 +642,147 @@ fit_sigq <- lm(growth_rate ~ delta_ori, data = known[mask_q, , drop = FALSE])
 summary(fit_all)
 summary(fit_sigq)
 ```
-	
-## 17 Out-of-fold predictions and regression diagnostics
+## Out-of-fold predictions and regression diagnostics
 
-To further assess the predictive performance and stability of the selected regression model, we generated out-of-fold (OOF) predictions using 5-fold cross-validation. In this procedure, the dataset was partitioned into five folds; for each fold, the model was trained on the remaining four folds and used to predict growth rates in the held-out fold. This ensured that each prediction was obtained from a model that had not been trained on the corresponding sample.
+As an extra check on the final model ($growth\_rate \sim \Delta_{ori}$), we generated out-of-fold (OOF) predictions with a single 5-fold split (one prediction per sample, always from a model trained without that sample). This complements the repeated CV summary by showing how the errors look, not only how big they are.
 
-Using these OOF predictions, we computed performance metrics including Root Mean Squared Error (RMSE), Mean Absolute Error (MAE), and the coefficient of determination (
-𝑅
-2
-R
-2
-). These metrics provide an unbiased estimate of generalization performance and allow direct comparison with repeated cross-validation results.
+The cloud follows the expected upward trend, so $\Delta_{ori}$ carries real signal. However, predictions are pulled toward the average: very low growth tends to be overestimated and very high growth tends to be underestimated. This “regression to the mean” is typical for a simple one-feature linear model.
 
-Diagnostic plots were generated to evaluate model behavior. A predicted-versus-observed scatter plot was used to assess calibration and overall predictive agreement, with the identity line indicating perfect prediction. Residual diagnostics included a residuals-versus-fitted plot to detect systematic bias or heteroscedasticity, and a histogram of residuals to examine distributional symmetry and potential outliers.
+Residuals are centered around zero with no strong curved pattern, which supports a roughly linear relationship at this resolution. The spread is not perfectly constant and a few points sit far from zero, suggesting remaining variability driven by factors not included in the model (condition-to-condition differences, noise, or other biology beyond replication signal).
 
-Together, these analyses provide a comprehensive evaluation of regression performance beyond summary statistics.
+Residuals are broadly symmetric but not perfectly tight, consistent with a model that captures a real effect while leaving substantial unexplained variation in the full dataset.
 
+Overall, the diagnostics match what we saw in cross-validation: $\Delta_{ori}$ is a meaningful predictor, but a single linear term cannot fully explain growth across all experimental conditions.
 
-  ```{r diagnostics}
-cv_oof_pred <- function(df, formula, k=5, seed=123) {
-  set.seed(seed)
-  n <- nrow(df)
-  fold_id <- sample(rep(seq_len(k), length.out=n))
-  pred <- rep(NA_real_, n)
-  for (fold in seq_len(k)) {
-    train <- df[fold_id != fold, , drop=FALSE]
-    test  <- df[fold_id == fold, , drop=FALSE]
-    fit <- lm(formula, data=train)
-    pred[fold_id == fold] <- predict(fit, newdata=test)
-  }
-  df$pred_oof <- pred
-  df
+```{r diagnostics}
+set.seed(123)
+
+df <- known
+k  <- 5
+
+# Assign folds once, produce one OOF prediction per sample
+fold_id <- sample(rep(1:k, length.out = nrow(df)))
+pred_oof <- rep(NA_real_, nrow(df))
+
+for (f in 1:k) {
+  fit <- lm(growth_rate ~ delta_ori, data = df[fold_id != f, , drop=FALSE])
+  pred_oof[fold_id == f] <- predict(fit, newdata = df[fold_id == f, , drop=FALSE])
 }
 
-oof_all <- cv_oof_pred(datasets$ALL, growth_rate ~ delta_ori, k=5, seed=123)
+resid_oof <- df$growth_rate - pred_oof
 
-resid_oof <- oof_all$growth_rate - oof_all$pred_oof
 rmse_oof <- sqrt(mean(resid_oof^2, na.rm=TRUE))
 mae_oof  <- mean(abs(resid_oof), na.rm=TRUE)
-ss_res <- sum(resid_oof^2, na.rm=TRUE)
-ss_tot <- sum((oof_all$growth_rate - mean(oof_all$growth_rate, na.rm=TRUE))^2, na.rm=TRUE)
-r2_oof <- 1 - ss_res/ss_tot
+r2_oof   <- 1 - sum(resid_oof^2, na.rm=TRUE) / 
+  sum((df$growth_rate - mean(df$growth_rate, na.rm=TRUE))^2, na.rm=TRUE)
 
-cat("\n--- OOF metrics (ALL | growth_rate ~ delta_ori) ---\n")
-cat("RMSE =", rmse_oof, "\nMAE  =", mae_oof, "\nR2   =", r2_oof, "\n")
+tibble(
+  model = "OOF 5-fold | growth_rate ~ delta_ori",
+  RMSE = rmse_oof,
+  MAE  = mae_oof,
+  R2   = r2_oof
+)
 
-# Predicted vs observed
-plot(oof_all$growth_rate, oof_all$pred_oof,
-     pch=16, col=col_q_fun(pmin(pmax(oof_all$q_full,0),1)),
-     xlab="Observed growth_rate", ylab="OOF predicted growth_rate",
-     main="OOF predicted vs observed (ALL model)")
-abline(0,1, lty=2, lwd=2)
+# Plots
+cols <- col_q_fun(pmin(pmax(df$q_full, 0), 1))
 
-# Residuals
-par(mfrow=c(1,2))
-plot(oof_all$pred_oof, resid_oof, pch=16, col="grey50",
-     xlab="OOF fitted", ylab="Residual", main="Residuals vs fitted (OOF)")
+par(mfrow=c(1,3), mar=c(4,4,2,1))
+
+plot(df$growth_rate, pred_oof,
+     pch=16, col=cols,
+     xlab="Observed growth rate (1/hr)",
+     ylab="OOF predicted growth rate (1/hr)",
+     main="OOF predicted vs observed")
+abline(0, 1, lty=2, lwd=2)
+
+plot(pred_oof, resid_oof, pch=16, col="grey50",
+     xlab="OOF fitted", ylab="Residual",
+     main="Residuals vs fitted (OOF)")
 abline(h=0, lty=2)
+
 hist(resid_oof, breaks=40, col="grey90", border="grey60",
-     main="Residual distribution (OOF)", xlab="Residual")
+     main="Residuals (OOF)", xlab="Residual")
+
 par(mfrow=c(1,1))
 ```
 
-## 18 Classification performance: ROC and AUC analysis
+## Classification performance: ROC and AUC analysis
 
-To assess whether replication-associated expression metrics can discriminate between faster- and slower-growing samples, we performed a receiver operating characteristic (ROC) analysis. Growth rate was binarized by defining “fast” samples as those in the upper quartile of the observed growth-rate distribution.
+To evaluate whether the replication signal can separate fast vs slow growth, we turned growth rate into a binary label: fast is the top 25% of observed growth rates, slow the remaining 75%.
 
-Using the out-of-fold predicted growth rates as a continuous score, we computed the ROC curve by evaluating true positive rates (TPR) and false positive rates (FPR) across all possible decision thresholds. The area under the ROC curve (AUC) was calculated using trapezoidal integration.
+We then used the OOF predicted growth rates as a continuous score and computed an ROC curve across all thresholds. The AUC summarizes discrimination: it is the probability that a randomly chosen fast sample gets a higher score than a randomly chosen slow sample ($AUC=0.5$ is random, $AUC \to 1$ is strong separation).
 
-The AUC quantifies the probability that a randomly chosen fast-growing sample receives a higher predicted score than a randomly chosen slower-growing sample. An AUC of 0.5 indicates no discriminative ability, whereas values approaching 1.0 indicate strong classification performance.
+The ROC curve lies consistently above the diagonal, indicating genuine out-of-sample discriminative signal. However, the separation is only moderate (AUC ≈ 0.69): many fast and slow samples overlap in predicted scores, so achieving high sensitivity requires accepting a non-trivial false-positive rate. Overall, $\Delta_{ori}$ captures enough replication-related information to rank growth phenotypes better than chance, but it is not a strong standalone classifier in this dataset.
 
-This analysis complements the regression framework by evaluating the practical ability of the replication-associated signal to identify high-growth phenotypes.
+```{r roc_auc, echo=FALSE}
+if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
+library(pROC)
 
+# Use the OOF predictions already computed in section 17
+oof_all <- df
+oof_all$pred_oof <- pred_oof
 
-
-  ```{r packages}
-roc_curve <- function(y_true_binary, score) {
-  ord <- order(score, decreasing=TRUE)
-  y <- y_true_binary[ord]
-  s <- score[ord]
-  # thresholds at each unique score
-  thr <- unique(s)
-  tpr <- fpr <- numeric(length(thr))
-  
-  P <- sum(y==1); N <- sum(y==0)
-  for (i in seq_along(thr)) {
-    pred_pos <- s >= thr[i]
-    TP <- sum(pred_pos & (y==1))
-    FP <- sum(pred_pos & (y==0))
-    tpr[i] <- if (P>0) TP/P else NA_real_
-    fpr[i] <- if (N>0) FP/N else NA_real_
-  }
-  data.frame(fpr=fpr, tpr=tpr)
-}
-
-auc_trapz <- function(fpr, tpr) {
-  o <- order(fpr)
-  x <- fpr[o]; y <- tpr[o]
-  sum((x[-1]-x[-length(x)]) * (y[-1]+y[-length(y)]) / 2, na.rm=TRUE)
-}
-
-# Define "fast" as top quartile by observed growth_rate (change q if you want)
+# "Fast" = top quartile by observed growth rate
 q_fast <- 0.75
-thr_fast <- quantile(oof_all$growth_rate, probs=q_fast, na.rm=TRUE)
-oof_all$fast_label <- ifelse(oof_all$growth_rate >= thr_fast, 1, 0)
+thr_fast <- as.numeric(quantile(oof_all$growth_rate, q_fast, na.rm = TRUE))
+oof_all$fast <- oof_all$growth_rate >= thr_fast
 
-roc <- roc_curve(oof_all$fast_label, oof_all$pred_oof)
-auc <- auc_trapz(roc$fpr, roc$tpr)
-cat("\nROC/AUC (fast = top", q_fast*100, "%): AUC =", auc, "\n")
+# ROC + AUC (OOF scores = out-of-sample discrimination)
+roc_obj <- pROC::roc(response = oof_all$fast, predictor = oof_all$pred_oof, quiet = TRUE)
+auc_val <- as.numeric(pROC::auc(roc_obj))
+cat("\nAUC (fast = top 25% by observed growth):", auc_val, "\n")
 
-plot(roc$fpr, roc$tpr, type="l", lwd=2,
-     xlab="False Positive Rate", ylab="True Positive Rate",
-     main=paste0("ROC (fast=top ", q_fast*100, "%). AUC=", round(auc,3)))
-abline(0,1,lty=2)
+# Plot (force standard ROC axes in [0,1]x[0,1])
+plot(1 - roc_obj$specificities, roc_obj$sensitivities, type="l", lwd=2,
+     xlab="(1 - Specificity)",
+     ylab="Sensitivity",
+     main=paste0("ROC (fast=top ", q_fast*100, "%). AUC=", round(auc_val, 3)),
+     xlim=c(0,1), ylim=c(0,1))
+abline(0, 1, lty=2)
 ```
-## 19
-Prediction of growth rates for previously unlabeled samples
+## Prediction of growth rates for unlabeled samples.
+Samples with missing growth-rate measurements were identified using the sentinel value $growth_rate = 1$. For these samples, we predicted growth rate from the ori-anchored replication contrast $\Delta_{ori}$ using the final regression model fitted on all labeled samples ($growth_rate \sim \Delta_{ori}$). We also computed 95% prediction intervals to reflect sample-level uncertainty.
+For unlabeled samples that also show a statistically supported circular signal ($q_{full}<0.05$), we additionally generated predictions from the model fitted only on the significant subset (same specification, trained on high-confidence samples). The output table reports the final prediction, its interval, and which model generated it.
 
-To extend the predictive framework to samples without measured growth rates, we identified entries in which growth rate was coded with a sentinel value (growth_rate = 1), indicating missing or unknown measurements. Only samples with valid replication metrics (finite 
-𝛿
-ori
-δ
-ori
-	​
-
- and 
-𝐴
-A) were retained for prediction.
-
-Predictions were generated using a tiered strategy. For all unknown samples, growth rate was first predicted using the model trained on the full dataset:
-
-growth_rate
-∼
-𝛿
-ori
-.
-growth_rate∼δ
-ori
-	​
-
-.
-
-Prediction intervals (95%) were computed to quantify uncertainty.
-
-For samples exhibiting a statistically significant circular signal (based on adjusted q-values), 
-  and provided that the high-confidence model was available, predictions were additionally computed using the model fitted on significant samples:
-
-growth_rate
-∼
-𝛿
-ori
-+
-𝐴
-.
-growth_rate∼δ
-ori
-	​
-
-+A.
-
-In such cases, the high-confidence model prediction was retained as the final estimate. 
-  This tiered approach prioritizes biologically reliable signals while maintaining predictions for all samples. 
-  The resulting output includes predicted growth rates, associated uncertainty intervals, and the source model used for each prediction.
-
-
-  ```{r packages}
-
+```{r predict_unknown, echo=FALSE}
 unknown <- merged_results2 %>%
-  filter(!is.na(growth_rate), growth_rate == 1) %>%
-  filter(is.finite(delta_ori), is.finite(A))
+  dplyr::filter(is.na(growth_rate) | growth_rate == 1) %>%   # unlabeled = NA or sentinel 1
+  dplyr::filter(is.finite(delta_ori), is.finite(A))
 
-if (nrow(unknown) == 0) {
-  cat("\nNo unknown samples (growth_rate==1) found.\n")
-} else {
-  pred_all <- predict(fit_all, newdata=unknown, interval="prediction", level=0.95)
-  unknown$pred_all <- pred_all[, "fit"]
-  unknown$pred_all_lo <- pred_all[, "lwr"]
-  unknown$pred_all_hi <- pred_all[, "upr"]
-  
-  unknown$pred_final <- unknown$pred_all
-  unknown$pred_source <- "ALL_model"
-  
-  if (!is.null(fit_hp)) {
-    mask_hc <- !is.na(unknown$q_full) & unknown$q_full < 0.05
-    if (any(mask_hc)) {
-      pred_hp <- predict(fit_hp, newdata=unknown[mask_hc,], interval="prediction", level=0.95)
-      unknown$pred_final[mask_hc] <- pred_hp[, "fit"]
-      unknown$pred_source[mask_hc] <- "HIGH_CONF_model"
-    }
-  }
-  
-  cat("\n--- Unknown predictions (head) ---\n")
-  print(unknown %>%
-          select(sample_id, delta_ori, A, p_full, q_full,
-                 pred_final, pred_source, pred_all_lo, pred_all_hi) %>%
-          arrange(desc(pred_final)) %>% head(20))
-}
+# Base predictions (ALL model)
+pred_all <- predict(fit_all, newdata = unknown,
+                    interval = "prediction", level = 0.95)
 
+unknown$pred_final    <- pred_all[, "fit"]
+unknown$pred_final_lo <- pred_all[, "lwr"]
+unknown$pred_final_hi <- pred_all[, "upr"]
+unknown$pred_source   <- "ALL"
+
+# If q_full < 0.05, overwrite with sig-only model (when available)
+mask_sig <- !is.na(unknown$q_full) & unknown$q_full < 0.05
+
+pred_sig <- predict(fit_sigq, newdata = unknown[mask_sig, , drop = FALSE],
+                    interval = "prediction", level = 0.95)
+
+unknown$pred_final[mask_sig]    <- pred_sig[, "fit"]
+unknown$pred_final_lo[mask_sig] <- pred_sig[, "lwr"]
+unknown$pred_final_hi[mask_sig] <- pred_sig[, "upr"]
+unknown$pred_source[mask_sig]   <- "sig_q"
+
+# Output (top 20 by predicted growth)
+unknown %>%
+  dplyr::select(sample_id, q_full, delta_ori, A,
+                pred_final, pred_final_lo, pred_final_hi, pred_source) %>%
+  dplyr::arrange(dplyr::desc(pred_final)) %>%
+  head(20)
+  tibble(
+  n_unknown = nrow(unknown),
+  n_sig_q   = sum(unknown$pred_source == "sig_q"),
+  n_all     = sum(unknown$pred_source == "ALL"),
+  pred_min  = min(unknown$pred_final, na.rm=TRUE),
+  pred_med  = median(unknown$pred_final, na.rm=TRUE),
+  pred_max  = max(unknown$pred_final, na.rm=TRUE)
+)
 ```
 ## 20
 Visualization of circular expression profiles
