@@ -99,10 +99,9 @@ head(expr_mat2[, 1:6, drop=FALSE])
 ```
 
 ## Genes grouped by Bins
-## Genes grouped by bins
 
 To represent the circular chromosome at a coarser (and less noisy) resolution, we partitioned the genome into fixed windows of 100 kb (“bins”). Each gene was assigned to a bin using its genomic midpoint, and because the chromosome is circular we used the wrapped coordinate $pos\_{mod} = pos \bmod L$ to keep positions inside $[0, L)$.
-
+  
 For each bin we defined a single representative angular coordinate $\theta$ using the bin midpoint. This midpoint was mapped onto $[0,2\pi)$ as:
 $$\theta = \frac{2\pi \cdot \text{bin\_mid}}{L}.$$
 
