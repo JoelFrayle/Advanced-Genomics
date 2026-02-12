@@ -441,88 +441,84 @@ results %>%
   head(10)
 ```
 	
-## 13 Integration with measured growth rates
+## Integration with measured growth rates
 
-To evaluate the biological relevance of the inferred replication-associated expression signal, we integrated the circular model results with experimentally measured growth rates. 
-  The growth-rate column was identified either manually or automatically by detecting metadata fields containing the term “growth” and prioritizing those indicating rates (e.g., expressed in 1/hr). 
-  The selected column was converted to numeric format for downstream analysis.
-Samples lacking valid growth-rate measurements were excluded. In addition, entries with a sentinel value of 1 were removed, as this value did not represent a biologically meaningful measurement. Only samples with finite estimates of the replication metrics 
-  (amplitude 𝐴 A, naive contrast  𝛿 = 2 𝐴 δ=2A, and origin-aligned contrast 𝛿 ori δ ori ) were retained for analysis.
-Significance masks were defined based on the F-test from the circular regression model, using both nominal p-values and Benjamini–Hochberg adjusted q-values (threshold 0.05).
+To evaluate whether the replication-associated expression gradient scales with bacterial growth, we integrated the growth-rate metadata provided for each sample. Growth rate was taken directly from the metadata column “Growth Rate (1/hr)” and converted to numeric. As indicated in the dataset documentation, samples with growth rate equal to 1 correspond to missing measurements and were excluded from downstream analyses. We further restricted the dataset to samples with finite estimates of the fitted effect size (A), the naive amplitude contrast ($\Delta=2A$), and the ori-anchored contrast ($\Delta_{ori}$). Finally, we defined the subset of statistically supported patterns using the BH-adjusted significance threshold on the full model ($q_{full}<0.05$), which is used in the subsequent association analyses with growth rate.
 
 ```{r growth rate}
-  detect_growth_col <- function(df) {
-  cand <- names(df)[grepl("growth", tolower(names(df)))]
-  if (length(cand) == 0) return(NA_character_)
-  # prefer ones that look like rate (1/hr)
-  cand2 <- cand[grepl("1/hr|rate", tolower(cand))]
-  if (length(cand2) > 0) return(cand2[1])
-  cand[1]
-}
-
-gr_col <- "Growth Rate (1/hr)"
-if (!(gr_col %in% names(merged_results))) {
-  auto <- detect_growth_col(merged_results)
-  if (is.na(auto)) stop("Growth-rate column not found. Set gr_col manually.")
-  gr_col <- auto
-  cat("Auto-detected growth-rate column as:", gr_col, "\n")
-}
-
 merged_results2 <- merged_results %>%
-  mutate(growth_rate = suppressWarnings(as.numeric(.data[[gr_col]])))
+  dplyr::mutate(
+    growth_rate = as.numeric(`Growth Rate (1/hr)`)
+  )
 
+## Keep only samples with measured growth rate (exclude sentinel = 1) and finite contrasts
 known <- merged_results2 %>%
-  filter(!is.na(growth_rate), growth_rate != 1) %>%      # exclude sentinel "1"
-  filter(is.finite(delta_ori), is.finite(delta), is.finite(A))
+  dplyr::filter(
+    !is.na(growth_rate),
+    growth_rate != 1,
+    is.finite(delta_ori),
+    is.finite(delta),
+    is.finite(A)
+  )
+
+## Significant fits (full model BH)
 mask_q <- !is.na(known$q_full) & known$q_full < 0.05
 
-``` 
-## 14 Correlation analysis between replication signal and growth rate
+## Quick look
+known %>%
+  dplyr::select(sample_id, growth_rate, q_full, A, delta, delta_ori) %>%
+  dplyr::arrange(growth_rate) %>%
+  head(10)
+```
+## Correlation analysis between replication signal and growth rate
 
-To assess the relationship between replication-associated expression gradients and cellular growth, 
-  we computed both Pearson and Spearman correlation coefficients between growth rate and the inferred replication metrics.
-We first evaluated the naive amplitude-based measure, 
-  
-  DELTA = 2 A 
+Using the samples with measured growth rate (known), we tested whether the replication-associated signal scales with growth by correlating growth rate with (i) the naive amplitude contrast $\Delta=2A$ and (ii) the ori-anchored contrast $\Delta_{ori}$ defined above. Correlations were computed on all samples with growth-rate measurements and on the subset of samples with a significant circular signal ($q<0.05$).
 
-  which corresponds to the maximal difference of the fitted sinusoid. We then analyzed the origin-aligned contrast,
+In the left plot, ($\delta=2A$) mainly tells you how strong the wave is in each sample. Red points (significant fits) tend to have larger delta, which just means the wave is clearer. But growth rate does not increase in a clear way as delta increases. In the right plot, delta_ori tells you which side is higher. The positive positive side are the ones higher at the origin side, and the negative are higher on the opposite side.
 
-  VEDI EQUAZIONE 
+Most non-significant samples sit near 0 (no clear difference). Significant samples spread away from 0, and many are negative, matching the earlier result that the peak is often opposite to the origin proxy. Therefore we keep using delta_ori, because it measures the specific “origin vs opposite” difference, not just the strength of the wave.
 
-  which specifically quantifies the fitted expression difference between the replication origin and the terminus.
+```{r correlation, echo=FALSE}
+# Significant subset (BH on the full model)
+mask_q <- !is.na(known$q_full) & known$q_full < 0.05
 
-Correlations were computed across all samples and separately restricted to samples exhibiting a statistically significant circular signal, 
-  based on either nominal p-values or false discovery rate–adjusted q-values. Scatter plots were generated to visualize these relationships, 
-  with points colored according to model significance.
-This analysis provides a direct test of whether the strength of the replication-associated expression gradient predicts cellular growth rate, 
-  as expected under gene-dosage effects during exponential replication.
+# Correlation table
+corr_tab <- tibble(
+  set = c("ALL", "ALL", "q_full<0.05", "q_full<0.05"),
+  metric = c("delta (=2A)", "delta_ori", "delta (=2A)", "delta_ori"),
+  pearson = c(
+    cor(known$delta, known$growth_rate, use="complete.obs", method="pearson"),
+    cor(known$delta_ori, known$growth_rate, use="complete.obs", method="pearson"),
+    cor(known$delta[mask_q], known$growth_rate[mask_q], use="complete.obs", method="pearson"),
+    cor(known$delta_ori[mask_q], known$growth_rate[mask_q], use="complete.obs", method="pearson")
+  ),
+  spearman = c(
+    cor(known$delta, known$growth_rate, use="complete.obs", method="spearman"),
+    cor(known$delta_ori, known$growth_rate, use="complete.obs", method="spearman"),
+    cor(known$delta[mask_q], known$growth_rate[mask_q], use="complete.obs", method="spearman"),
+    cor(known$delta_ori[mask_q], known$growth_rate[mask_q], use="complete.obs", method="spearman")
+  )
+)
 
-```{r correlation}
-analyze_corr <- function(df, xvar, yvar="growth_rate", title="", use_mask=NULL) {
-  d <- df
-  if (!is.null(use_mask)) d <- d[use_mask, , drop=FALSE]
-  x <- d[[xvar]]; y <- d[[yvar]]
-  
-  cat("\n---", title, "---\n")
-  cat("n =", sum(complete.cases(x,y)), "\n")
-  cat("Pearson :", cor(x,y, use="complete.obs", method="pearson"), "\n")
-  cat("Spearman:", cor(x,y, use="complete.obs", method="spearman"), "\n")
-  
-  cols <- col_q_fun(pmin(pmax(d$q_full, 0), 1))
-  sigq <- !is.na(d$q_full) & d$q_full < 0.05
-  
-  plot(x, y, pch=16, col=cols,
-       cex=ifelse(sigq, 1.2, 0.8),
-       xlab=xvar, ylab=yvar, main=title)
-  points(x[sigq], y[sigq], pch=21, bg=cols[sigq], col="black", cex=1.2)
-  abline(h=0, v=0, lty=3)
-}
+corr_tab
 
-analyze_corr(known, "delta",     title="Naive: delta=2A vs growth_rate (ALL)")
-analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (ALL)")
-analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (sig_by_p)", use_mask=mask_p)
-analyze_corr(known, "delta_ori", title="Corrected: delta_ori vs growth_rate (sig_by_q)", use_mask=mask_q)
-``` 
+# Scatter plots (ALL), colored by q_full (already defined earlier as col_q_fun)
+cols <- col_q_fun(pmin(pmax(known$q_full, 0), 1))
+
+par(mfrow=c(1,2))
+
+plot(known$delta, known$growth_rate, pch=16, col=cols,
+     xlab="delta (=2A)", ylab="Growth Rate (1/hr)",
+     main="delta vs growth rate (colored by q_full)")
+abline(h=0, v=0, lty=3)
+
+plot(known$delta_ori, known$growth_rate, pch=16, col=cols,
+     xlab="delta_ori", ylab="Growth Rate (1/hr)",
+     main="delta_ori vs growth rate (colored by q_full)")
+abline(h=0, v=0, lty=3)
+
+par(mfrow=c(1,1))
+```
 ## 15 Cross-validation of predictive models
 
 To evaluate the predictive performance of replication-associated expression metrics, we performed repeated k-fold cross-validation using linear regression models. 
