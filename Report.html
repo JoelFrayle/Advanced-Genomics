@@ -7,7 +7,7 @@ output:
     theme: journal
     toc: true
     toc_float: true
-    number_sections: true
+    number_sections: false
 ---
 
 ```{r setup, include=FALSE}
@@ -16,7 +16,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Project number 5: DNA replication introduces copy number variations that are detectable in RNA-seq
 
-We have to install and run the required packages:
+We load the packages used throughout the analysis for data manipulation (dplyr, data.table), string handling (stringr), scaling utilities (scales), and tidy outputs (tibble).
 
 ```{r packages}
 #install.packages('lubridate')
@@ -27,9 +27,7 @@ library(dplyr); library(data.table); library(stringr); library(scales); library(
 
 ## File Handling 
 
-First we read the datasets and then we explore them. 
-expr_df is a collection of gene expression data for E. Coli generated through single cell RNA-seq analysis, and have been already normalized with logarithmic function; each colname represents the experiments, and the rownames represent the genes_identifier;
-meta_df instead contains all the metadata related to each sample;
+We first load a gene-by-sample expression matrix in logTPM scale, where the first column contains gene identifiers and the remaining columns correspond to samples, and a metadata table with sample-level annotations.
 
 
 ```{r file reading }
@@ -41,7 +39,7 @@ colnames(meta_df)[1:10]
 ```
 
 ## Mapping
-We retrieve the information from NCBI that give us the Genes, and the position in a lineal sequence. This is going to help us later to set the position of each one of the genes in our dataset.
+We download the E. coli genome annotation (GFF) from NCBI to obtain genomic coordinates for each gene. These coordinates allow us to map expression measurements onto positions along the chromosome.
 
 ```{r mapping }
 gff_url  <- "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.gff.gz"
@@ -54,9 +52,7 @@ table(gff$type) #We make some expoloration of the data in gff
 ```
 
 ## Extraction usefull information:
-  we subset from gff, and we keep only the information for our specific case: gene_id, start and end position of each gene;
-  as we need a circular chromosome, we need to compute the specific position; we set "pos" as the average of the start and end positions of each gene; 
-  then we will approximate the position of each gene to these "pos" values.
+In this step we transform the raw NCBI GFF annotation into a clean gene-coordinate table that can be joined with the expression matrix. We first restrict the annotation to features of type gene and extract the locus_tag from the attribute field (attr) to obtain a gene identifier compatible with our dataset. Because the GFF may contain multiple sequences (e.g., chromosome and plasmids), we identify the main chromosome as the seqid with the largest coordinate span and store it in genes_main for downstream origin (oriC) detection. We then keep only the essential columns (gene_id, start, end), enforce integer coordinates, and estimate the chromosome length as $L=\max(end)$. Finally, each gene is represented by a single position $pos=(start+end)/2$ (midpoint), which provides a unique coordinate per gene for subsequent binning and circular mapping.
 
 ```{r obtaining coordinates}
 gff <- gff[type == "gene"] #We remain just with the gene information
@@ -82,7 +78,7 @@ head(gene_coords)
 
 ## Map expression matrix to genes with coords
 
-We have to make some sanity checks as looking if we have in our dataset one gene more than once. At the end of this block we have "gene_info" with the position, and "expr_mat2" with the expression organized to match the order in "gene_info"
+At this stage, we align the expression matrix with the genomic coordinate table using a common gene identifier. As a basic integrity check, we confirm that gene IDs in the expression input are not duplicated, since repeated identifiers would break the one-to-one mapping between expression rows and genomic positions. We then build gene_info by joining the expression gene list with gene_coords, yielding a per-gene table that includes genomic coordinates (and later-derived quantities such as bin and angle). In parallel, we convert the expression values into a numeric matrix (expr_mat) and reorder/subset it to produce expr_mat2, ensuring that its row order matches exactly the order of gene_info. This guarantees that downstream binning and circular modeling are performed on expression values consistently matched to the correct genomic locations.
 
 ```{r Map expression matrix to genes with coords }
 expr_gene_id <- expr_df[[1]] #Expression values themselves have no genomic meaning unless you know which gene each row corresponds to. So we extract the genes id of our dataset.
@@ -103,13 +99,16 @@ head(expr_mat2[, 1:6, drop=FALSE])
 ```
 
 ## Genes grouped by Bins
-As suggested by the assignment, we divided the circular genome into fixed-size windows of 100 kb length;
-  each window is a bin; 
-   We have 46 bins, according to the total length of the Coli Genome;
-  We then assign each gene to a bin based on its genomic position;
-for each bin, we computed a single angular coordinate (theta);
-So in the future we can model expression as a sinusoid over the genome.  
-  y = α + β cos(θ) + γ sin(θ)
+## Genes grouped by bins
+
+To represent the circular chromosome at a coarser (and less noisy) resolution, we partitioned the genome into fixed windows of 100 kb (“bins”). Each gene was assigned to a bin using its genomic midpoint, and because the chromosome is circular we used the wrapped coordinate $pos\_{mod} = pos \bmod L$ to keep positions inside $[0, L)$.
+
+For each bin we defined a single representative angular coordinate $\theta$ using the bin midpoint. This midpoint was mapped onto $[0,2\pi)$ as:
+$$\theta = \frac{2\pi \cdot \text{bin\_mid}}{L}.$$
+
+This bin-level angle is the input for the downstream circular regression model,
+$$y = \alpha + \beta\cos(\theta) + \gamma\sin(\theta),$$
+where $y$ is the mean log-expression per bin. We also tracked the number of genes per bin ($n\_{genes}$), which can later be used as regression weights to account for unequal gene counts across windows.
   
 ```{r bin definition }
 window_size <- 100000
@@ -140,7 +139,11 @@ theta_by_bin <- gene_info %>%
 
 ## Mean logTPM per bin per sample
 
-Now we have to aggregate the gene expression into bin expression. So at the end of this step we will have a long format with the bin, the sample, the mean expression (we can perform this mean directly due to the fact that the data is already in logaritmic form), the position in angular coordinate and the number of genes in each window. In this way, if necessary, we can easily apply a weighting.
+To fit the circular model, we first aggregated gene-level expression into bin-level expression. For each sample and each genomic bin, we computed the mean of the logTPM values across all genes assigned to that bin:
+$$y_{b,s}=\frac{1}{|G_b|}\sum_{g\in G_b} y_{g,s},$$
+where $G_b$ is the set of genes in bin $b$. Because the expression matrix is already in log scale, averaging within bins provides a stable summary of the bin’s typical expression level.
+
+We then reshaped the bin-by-sample matrix into a long-format table with one row per $(bin,\ sample)$ pair, and we attached: (i) the bin’s angular coordinate $\theta_{bin}$ (from the bin midpoint) and (ii) the number of genes in the bin $n_{genes}=|G_b|$. This final table (`bin_expr`) is the direct input for the per-sample circular regression, and $n_{genes}$ can be used as a weight to account for bins containing different numbers of genes.
 ```{r Bin Expression}
 y_bin_mat <- sapply(idx_by_bin, function(idx) {
   colMeans(expr_mat2[idx, , drop=FALSE], na.rm=TRUE)
@@ -525,6 +528,7 @@ abline(h=0, v=0, lty=3)
 
 par(mfrow=c(1,1))
 ```
+
 ## Cross-validation of predictive models
 
 To quantify how informative the replication-related metrics are about bacterial growth, we framed the problem as a prediction task: given a sample’s replication signal estimated from the circular model, can we predict its measured growth rate $\mu$ (1/hr)? We evaluated simple linear regression models because the project’s theoretical expectation suggests an approximately monotonic relationship between copy-number gradients and growth, and linear models are interpretable and allow a clean comparison between alternative replication metrics.
@@ -549,7 +553,7 @@ Then, to estimate out-of-sample performance, we used repeated 5-fold cross-valid
 We evaluated performance on two datasets: First , all samples with valid growth-rate measurements (excluding the sentinel value $\mu=1$ used for missing growth rates), and the second one sig\_q: the subset with a statistically supported circular signal ($q_{\mathrm{full}}<0.05$).
   In the full dataset, the ori-anchored contrast $\Delta_{\mathrm{ori}}$ provides measurable predictive value (positive $R^2$), whereas phase-free effect-size predictors ($A$ or $\Delta$) perform worse than predicting the mean growth rate (negative $R^2$). This indicates that, once phase is ignored, “how strong the wave is” does not reliably map to growth across heterogeneous conditions; anchoring the contrast to ori carries substantially more growth-relevant information.
   
-  Restricting to samples with a clear circular replication signal strengthens the relationship: $\Delta_{\mathrm{ori}}$ explains a substantial fraction of out-of-sample variance ($R^2 \approx 0.59$). Adding $A$ slightly worsens performance, suggesting that once the contrast is correctly oriented (ori vs opposite), additional “overall amplitude” does not add independent predictive information and may introduce noise given the small sample size.
+Restricting to samples with a clear circular replication signal strengthens the relationship: $\Delta_{\mathrm{ori}}$ explains a substantial fraction of out-of-sample variance ($R^2 \approx 0.59$). Adding $A$ slightly worsens performance, suggesting that once the contrast is correctly oriented (ori vs opposite), additional “overall amplitude” does not add independent predictive information and may introduce noise given the small sample size.
 
 These results are consistent with the earlier directionality analysis: in this dataset the fitted peak location is not reliably aligned with $\theta_{\mathrm{ori}}$, so phase-free metrics ($A$ or $\Delta$) are not appropriate proxies for an origin–terminus gradient. In contrast, $\Delta_{\mathrm{ori}}$ directly measures the fitted expression difference between ori and the opposite genomic position, preserving direction and remaining interpretable even when the peak is shifted. Therefore, in the remainder of the analysis we treat $\Delta_{\mathrm{ori}}$ as the primary replication signal when relating the fitted sinusoid to growth rate.
 
@@ -812,168 +816,109 @@ unknown %>%
   pred_max  = max(unknown$pred_final, na.rm=TRUE)
 )
 ```
-## 20
-Visualization of circular expression profiles
+## Visualization of circular expression profiles
 
-To provide intuitive demonstrations of the circular modeling framework, representative example samples were selected from three categories: a fast-growing sample with a significant replication signal, a slow-growing or weak-signal sample, and (if available) a sample with unknown growth rate.
+To make the circular model easier to interpret, we plotted three representative samples: (i) a fast-growing sample with a significant circular replication signal, (ii) a slow / weak-signal sample, and (iii) one unlabeled sample (missing growth rate) when available.
 
-For each selected sample, three complementary visualizations were generated:
+For each sample we show three panels:
 
-Expression vs. genomic angle — The binned mean logTPM values were plotted as a function of the angular genomic coordinate 
-𝜃
-θ, together with the fitted circular regression curve. Vertical lines indicate the angular positions of the replication origin (
-𝜃
-ori
-θ
-ori
-	​
+Expression vs genomic angle ($\theta$): binned mean logTPM across the genome with the fitted sinusoid, plus reference lines at $\theta_{ori}$ and $\theta_{ori}+\pi$ (opposite side), and the fitted $\theta_{max}$ / $\theta_{min}$.  
+Polar view: the same information mapped to a circle to emphasize genome continuity.  
+Compact summary: signal strength and orientation ($A$, $\Delta=2A$, $\Delta_{ori}$), model significance ($q_{full}$), observed growth rate when available, and the predicted growth rate with a 95% prediction interval. Predictions follow the same rule used before: if $q_{full}<0.05$ we use the $sig\_q$ model; otherwise we use the ALL model.
 
-) and its opposite position (putative terminus), as well as the model-estimated maximum and minimum of the fitted wave.
+These plots provide an intuitive link between the fitted circular expression gradient and how $\Delta_{ori}$ is used to predict growth.
 
-Polar representation — The same data were displayed in polar coordinates, illustrating the circular structure of the genome and the fitted sinusoidal gradient. This view emphasizes the spatial continuity of the replication-associated expression pattern.
+```{r visualizations, echo=FALSE}
+# pick 3 examples: fast+significant, slow/weak, and one unlabeled (if exists)
+mask_q <- !is.na(known$q_full) & known$q_full < 0.05
 
-Prediction summary panel — For each sample, observed growth rate (if available), statistical significance of the circular fit, replication metrics (
-𝐴
-A, 
-𝛿
-δ, 
-𝛿
-ori
-δ
-ori
-	​
-
-), and predicted growth rate with confidence interval were summarized.
-
-These visual demonstrations highlight how the origin–terminus expression gradient translates into predicted growth rate and provide an intuitive link between the circular genomic model and the biological interpretation of replication-associated gene dosage effects.
-
-    ```{r visualizations}
-pick_examples <- function(known_df, unknown_df) {
-  fast_pool <- known_df %>% filter(!is.na(p_full) & p_full < 0.05)
-  if (nrow(fast_pool) == 0) fast_pool <- known_df
-  id_fast <- fast_pool$sample_id[which.max(fast_pool$growth_rate)]
-  
-  slow_pool <- known_df %>% filter(!is.na(p_full) & p_full > 0.2)
-  if (nrow(slow_pool) == 0) slow_pool <- known_df
-  score <- with(slow_pool, rank(A, ties.method="average") + rank(abs(delta_ori), ties.method="average"))
-  id_slow <- slow_pool$sample_id[which.min(score)]
-  
-  id_unk <- if (nrow(unknown_df) > 0) unknown_df$sample_id[1] else NA_character_
-  list(fast=id_fast, slow=id_slow, unknown=id_unk)
+id_fast <- known %>%
+  dplyr::filter(mask_q) %>%
+  dplyr::arrange(dplyr::desc(growth_rate)) %>%
+  dplyr::slice(1) %>%
+  dplyr::pull(sample_id)
+if (length(id_fast) == 0) {
+  id_fast <- known %>% dplyr::arrange(dplyr::desc(growth_rate)) %>% dplyr::slice(1) %>% dplyr::pull(sample_id)
 }
 
-plot_sample_demo <- function(sid, bin_expr, merged_results2, theta_ori, fit_all, fit_hp=NULL, gate=c("p","q"),
-                             main_prefix="") {
-  gate <- match.arg(gate)
-  
-  # IMPORTANT FIX: use .data$sample_id == sid
-  df <- bin_expr %>% filter(.data$sample_id == sid)
-  if (nrow(df) == 0) { cat("No bins for:", sid, "\n"); return(invisible(NULL)) }
-  
-  rr <- merged_results2 %>% filter(.data$sample_id == sid)
-  if (nrow(rr) == 0) { cat("No result row for:", sid, "\n"); return(invisible(NULL)) }
-  rr <- rr[1, ]
-  
-  # fit circular model for plotting
-  fit <- lm(y ~ cos(theta_bin) + sin(theta_bin), data=df, weights=df$n_genes)
-  
-  th_grid <- seq(0, 2*pi, length.out=600)
-  yhat <- predict(fit, newdata=data.frame(theta_bin=th_grid))
-  
-  # regression predictions
-  pred_all <- predict(fit_all, newdata=data.frame(delta_ori=rr$delta_ori), interval="prediction", level=0.95)
-  pred_final <- pred_all[1,"fit"]; pred_lo <- pred_all[1,"lwr"]; pred_hi <- pred_all[1,"upr"]
-  source <- "ALL_model"
-  
-  if (!is.null(fit_hp)) {
-    gate_ok <- if (gate=="p") (!is.na(rr$p_full) && rr$p_full < 0.05) else (!is.na(rr$q_full) && rr$q_full < 0.05)
-    if (gate_ok) {
-      pred_hp <- predict(fit_hp, newdata=data.frame(delta_ori=rr$delta_ori, A=rr$A), interval="prediction", level=0.95)
-      pred_final <- pred_hp[1,"fit"]; pred_lo <- pred_hp[1,"lwr"]; pred_hi <- pred_hp[1,"upr"]
-      source <- paste0("HIGH_CONF (gate=", gate, ")")
-    }
-  }
-  
+id_slow <- known %>%
+  dplyr::filter(!mask_q) %>%
+  dplyr::arrange(growth_rate) %>%
+  dplyr::slice(1) %>%
+  dplyr::pull(sample_id)
+if (length(id_slow) == 0) {
+  id_slow <- known %>% dplyr::arrange(growth_rate) %>% dplyr::slice(1) %>% dplyr::pull(sample_id)
+}
+
+id_unk <- unknown %>%
+  dplyr::arrange(dplyr::desc(delta_ori)) %>%
+  dplyr::slice(1) %>%
+  dplyr::pull(sample_id)
+if (length(id_unk) == 0) id_unk <- NA_character_
+
+plot_demo <- function(sid, tag="") {
+  df <- bin_expr %>% dplyr::filter(sample_id == sid) %>% dplyr::arrange(theta_bin)
+  rr <- merged_results2 %>% dplyr::filter(sample_id == sid) %>% dplyr::slice(1)
+
+  # circular fit for visualization
+  fit_circ <- lm(y ~ cos(theta_bin) + sin(theta_bin), data = df, weights = df$n_genes)
+
+  th_grid <- seq(0, 2*pi, length.out = 600)
+  yhat <- predict(fit_circ, newdata = data.frame(theta_bin = th_grid))
+
+  # growth prediction (same tier rule as section 19)
+  use_sig <- exists("fit_sigq") && !is.null(fit_sigq) && !is.na(rr$q_full) && rr$q_full < 0.05
+  fit_pred <- if (use_sig) fit_sigq else fit_all
+  pred <- predict(fit_pred, newdata = data.frame(delta_ori = rr$delta_ori),
+                  interval = "prediction", level = 0.95)
+
   gr_obs <- rr$growth_rate
-  gr_label <- if (!is.na(gr_obs) && gr_obs != 1) sprintf("Observed growth_rate = %.3f", gr_obs) else "Observed growth_rate = NA (coded as 1)"
-  
-  # Panel layout: (1) y vs theta, (2) polar bins+fit, (3) summary text
-  oldpar <- par(no.readonly=TRUE); on.exit(par(oldpar), add=TRUE)
-  par(mfrow=c(1,3), mar=c(4,4,3,1))
-  
-  ## (1) y vs theta
-  o <- order(df$theta_bin)
-  df_o <- df[o,]
-  plot(df_o$theta_bin, df_o$y, pch=16, col="grey60",
-       xlab="theta (radians)", ylab="mean logTPM (bin)",
-       main=paste0(main_prefix, sid))
-  lines(th_grid, yhat, lwd=3)
-  abline(v=theta_ori, lty=2, lwd=2, col="darkgreen")
-  abline(v=(theta_ori+pi)%%(2*pi), lty=3, lwd=2, col="darkgreen")
-  if (!is.na(rr$theta_max)) abline(v=rr$theta_max, lty=2, col="black")
-  if (!is.na(rr$theta_min)) abline(v=rr$theta_min, lty=3, col="black")
-  legend("topright",
-         legend=c("bins","fit","ori","opp","theta_max","theta_min"),
-         lty=c(NA,1,2,3,2,3), pch=c(16,NA,NA,NA,NA,NA),
-         col=c("grey60","black","darkgreen","darkgreen","black","black"),
-         bty="n", cex=0.8)
-  
-  ## (2) polar view: plot bins as points + fitted curve as line
-  # scale to radius
-  r_fit <- (yhat - min(yhat)) / (max(yhat)-min(yhat) + 1e-12)
-  r_fit <- 0.25 + 0.75*r_fit
-  x_fit <- r_fit*cos(th_grid); y_fit <- r_fit*sin(th_grid)
-  
-  # bins scaled
-  yb <- df_o$y
-  r_bin <- (yb - min(yhat)) / (max(yhat)-min(yhat) + 1e-12)
-  r_bin <- pmin(pmax(0.25 + 0.75*r_bin, 0.1), 1.1)
-  x_bin <- r_bin*cos(df_o$theta_bin); y_bin <- r_bin*sin(df_o$theta_bin)
-  
-  plot(0,0,type="n", asp=1, xlim=c(-1.1,1.1), ylim=c(-1.1,1.1),
-       xlab="", ylab="", main="Polar: bins + fit")
-  t0 <- seq(0,2*pi,length.out=400)
-  lines(cos(t0), sin(t0), col="grey80")
-  points(x_bin, y_bin, pch=16, col="grey60", cex=0.7)
-  lines(x_fit, y_fit, lwd=3)
-  
-  points(cos(theta_ori), sin(theta_ori), pch=8, col="darkgreen", cex=1.2)
-  points(cos((theta_ori+pi)%%(2*pi)), sin((theta_ori+pi)%%(2*pi)), pch=4, col="darkgreen", cex=1.2)
-  
-  if (!is.na(rr$theta_max)) points(cos(rr$theta_max), sin(rr$theta_max), pch=16, col="black")
-  if (!is.na(rr$theta_min)) points(cos(rr$theta_min), sin(rr$theta_min), pch=1,  col="black")
-  
-  ## (3) summary
-  plot.new()
-  title(main="Prediction summary")
+  gr_txt <- if (!is.na(gr_obs) && gr_obs != 1) sprintf("Observed growth_rate: %.3f", gr_obs) else "Observed growth_rate: NA"
+  src_txt <- if (use_sig) "Prediction model: sig_q" else "Prediction model: ALL"
+
+  par(mfrow = c(1,3), mar = c(4,4,3,1))
+
+  # (1) expression vs theta
+  plot(df$theta_bin, df$y, pch = 16, col = "grey60",
+       xlab = "theta (radians)", ylab = "mean logTPM (bin)",
+       main = paste0(tag, sid))
+  lines(th_grid, yhat, lwd = 3)
+  abline(v = theta_ori, lty = 2, lwd = 2)
+  abline(v = (theta_ori + pi) %% (2*pi), lty = 3, lwd = 2)
+  abline(v = rr$theta_max, lty = 2, col = "black")
+  abline(v = rr$theta_min, lty = 3, col = "black")
+
+  # (2) polar view (simple rescaling to radius)
+  r_bin <- (df$y - min(yhat)) / (max(yhat) - min(yhat) + 1e-12)
+  r_bin <- 0.25 + 0.75 * r_bin
+  r_fit <- (yhat - min(yhat)) / (max(yhat) - min(yhat) + 1e-12)
+  r_fit <- 0.25 + 0.75 * r_fit
+
+  plot(0, 0, type = "n", asp = 1, xlim = c(-1.1,1.1), ylim = c(-1.1,1.1),
+       xlab = "", ylab = "", main = "Polar view")
+  t0 <- seq(0, 2*pi, length.out = 400)
+  lines(cos(t0), sin(t0), col = "grey80")
+  points(r_bin*cos(df$theta_bin), r_bin*sin(df$theta_bin), pch = 16, col = "grey60", cex = 0.7)
+  lines(r_fit*cos(th_grid), r_fit*sin(th_grid), lwd = 3)
+  points(cos(theta_ori), sin(theta_ori), pch = 8, cex = 1.2)
+  points(cos((theta_ori+pi)%%(2*pi)), sin((theta_ori+pi)%%(2*pi)), pch = 4, cex = 1.2)
+
+  # (3) compact summary
+  plot.new(); title(main = "Summary")
   txt <- c(
-    gr_label,
-    sprintf("p_full=%.3g | q_full=%.3g", rr$p_full, rr$q_full),
-    sprintf("A=%.3f | delta=%.3f | delta_ori=%.3f", rr$A, rr$delta, rr$delta_ori),
+    gr_txt,
+    sprintf("q_full: %.3g", rr$q_full),
+    sprintf("A: %.3f | delta: %.3f | delta_ori: %.3f", rr$A, rr$delta, rr$delta_ori),
     "",
-    sprintf("Predicted growth_rate (%s):", source),
-    sprintf("  %.3f  [%.3f, %.3f]", pred_final, pred_lo, pred_hi),
-    "",
-    "Interpretation:",
-    "delta_ori > 0 => ori-side higher than opposite",
-    "larger delta_ori => stronger ori→ter gradient",
-    "=> predicts higher growth rate in these data"
+    src_txt,
+    sprintf("Predicted: %.3f  [%.3f, %.3f]", pred[1,"fit"], pred[1,"lwr"], pred[1,"upr"])
   )
-  text(0,1, adj=c(0,1), labels=paste(txt, collapse="\n"), cex=0.9)
+  text(0, 1, adj = c(0,1), labels = paste(txt, collapse = "\n"), cex = 0.9)
+
+  par(mfrow = c(1,1))
 }
 
-ex_ids <- pick_examples(datasets$ALL, unknown)
-print(ex_ids)
-
-plot_sample_demo(ex_ids$fast,    bin_expr, merged_results2, theta_ori, fit_all, fit_hp, gate="p", main_prefix="FAST: ")
-plot_sample_demo(ex_ids$slow,    bin_expr, merged_results2, theta_ori, fit_all, fit_hp, gate="p", main_prefix="SLOW/FLAT: ")
-if (!is.na(ex_ids$unknown)) {
-  plot_sample_demo(ex_ids$unknown, bin_expr, merged_results2, theta_ori, fit_all, fit_hp, gate="p", main_prefix="UNKNOWN: ")
-} else {
-  cat("No unknown samples (growth_rate==1) found.\n")
-}
-
+plot_demo(id_fast, tag = "FAST + significant: ")
+plot_demo(id_slow, tag = "SLOW / weak-signal: ")
+if (!is.na(id_unk)) plot_demo(id_unk, tag = "UNLABELED: ")
 ```
-
-  
-  
