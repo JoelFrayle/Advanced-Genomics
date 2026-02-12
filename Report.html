@@ -623,30 +623,25 @@ boxplot(RMSE ~ model, data = cv_df[cv_df$dataset == "sig_q", ],
 par(mfrow = c(1, 1))
 ```
 			
-## 16
-Final model fitting
-Based on cross-validation results, a final linear model was fitted using the full dataset:
-growth_rate ∼ 𝛿 ori . growth_rate∼δ ori .
+## Final model fitting
+Based on the cross-validation results, we retained the simplest and best-performing specification and fitted the final model on the full dataset $growth_rate \sim \Delta_{ori}$.
 
-In addition, a high-confidence model was fitted using only samples with a statistically significant circular signal (based on nominal p-values), 
-    provided that the sample size was sufficient. In this subset, growth rate was modeled as a function of both the origin-aligned contrast and the fitted amplitude:
-growth_rate ∼ 𝛿 ori + 𝐴. growth_rate∼δ ori +A.
-Model summaries were examined to assess coefficient estimates, statistical significance, and explained variance. 
-    These final models provide an interpretable relationship between replication-associated expression gradients and cellular growth rate.
+Across all samples with measured growth rate ($n=353$), $\Delta_{ori}$ shows a clear positive association with growth (slope $=0.660$, $p=9.35\times 10^{-14}$), explaining a modest but non-negligible fraction of variance ($R^2=0.146$). This is expected in a heterogeneous compendium where many factors beyond replication-related gene dosage contribute to growth.
 
-    ```{r final model fitting}
+We then fitted the same model on a higher-confidence subset restricted to samples with a statistically significant circular signal ($q_{full}<0.05$; $n=27$). In this subset the relationship strengthens substantially (slope $=0.881$, $p=2.19\times 10^{-7}$), and the model explains roughly two thirds of the observed growth-rate variance ($R^2=0.665$). Overall, these final fits confirm that the ori-anchored replication contrast $\Delta_{ori}$ is an interpretable predictor of growth, and that its explanatory power is highest when the replication-associated sinusoidal signal is clearly detectable in the transcriptome.
 
-fit_all <- lm(growth_rate ~ delta_ori, data=datasets$ALL)
+```{r final model fitting}
+# Final model (ALL samples with growth rate)
+fit_all <- lm(growth_rate ~ delta_ori, data = known)
 
-# "High-confidence" model: prefer sig_by_p due to larger n than sig_by_q
-fit_hp  <- NULL
-if (nrow(datasets$sig_by_p) >= 20) {
-  fit_hp <- lm(growth_rate ~ delta_ori + A, data=datasets$sig_by_p)
-}
+# High-confidence subset (q_full < 0.05)
+mask_q <- !is.na(known$q_full) & known$q_full < 0.05
+fit_sigq <- lm(growth_rate ~ delta_ori, data = known[mask_q, , drop = FALSE])
 
-cat("\n--- fit_all summary ---\n"); print(summary(fit_all))
-if (!is.null(fit_hp)) { cat("\n--- fit_hp summary (sig_by_p) ---\n"); print(summary(fit_hp)) }
+summary(fit_all)
+summary(fit_sigq)
 ```
+	
 ## 17 Out-of-fold predictions and regression diagnostics
 
 To further assess the predictive performance and stability of the selected regression model, we generated out-of-fold (OOF) predictions using 5-fold cross-validation. In this procedure, the dataset was partitioned into five folds; for each fold, the model was trained on the remaining four folds and used to predict growth rates in the held-out fold. This ensured that each prediction was obtained from a model that had not been trained on the corresponding sample.
